@@ -1,4 +1,3 @@
-// server/src/server.ts
 import express from 'express';
 import cors from 'cors';
 import { ServerConfig } from './serverConfig';
@@ -9,48 +8,59 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// -----------------------------------------------------------------------------
-// Health: quick DB ping
-// -----------------------------------------------------------------------------
+// Health
 app.get('/health', async (_req, res) => {
   try {
     await db.execute(sql`select 1 as ok`);
     res.json({ ok: true, service: 'sleepinn-api' });
-  } catch (e) {
+  } catch {
     res.status(500).json({ ok: false, error: 'db_unreachable' });
   }
 });
 
-// -----------------------------------------------------------------------------
-// Listings (with filters)
+// ---- Cities (distinct) -------------------------------------------------------
+app.get('/api/cities', async (_req, res) => {
+  try {
+    const rows = await db.execute(sql`
+      SELECT DISTINCT city FROM listings
+      WHERE city IS NOT NULL AND city <> ''
+      ORDER BY city ASC
+    `);
+    res.json(rows.rows.map(r => r.city));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to fetch cities' });
+  }
+});
+
+// ---- Listings with filters ---------------------------------------------------
 // GET /api/listings?city=&min=&max=&instant=true&limit=24
-// Notes:
 // - price_per_night is TEXT in DB → CAST to INT for numeric filters
-// - Response shape: array of rows (kept same as your previous endpoint)
-// -----------------------------------------------------------------------------
+// - city filter is "space-insensitive": 'georgetown' matches 'George Town'
 app.get('/api/listings', async (req, res) => {
   const { city, min, max, instant, limit } = req.query as Record<string, string | undefined>;
 
-  // Tweakables / safety clamps
   const DEFAULT_LIMIT = 24;
   const MAX_LIMIT = 50;
-  const MIN_PRICE = 0;        // RM
-  const MAX_PRICE = 100_000;  // RM safety upper
+  const MIN_PRICE = 0;
+  const MAX_PRICE = 100_000;
 
   const lim = Math.min(Math.max(Number(limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
 
-  // parse + clamp min/max
   const minParsed = Number(min);
   const maxParsed = Number(max);
   let minRM = Number.isFinite(minParsed) ? Math.max(minParsed, MIN_PRICE) : MIN_PRICE;
   let maxRM = Number.isFinite(maxParsed) ? Math.min(maxParsed, MAX_PRICE) : MAX_PRICE;
   if (minRM > maxRM) [minRM, maxRM] = [maxRM, minRM];
 
-  // optional filters
-  const cityFilter =
-    typeof city === 'string' && city.trim()
-      ? sql`AND l.city ILIKE ${'%' + city.trim() + '%'}`
-      : sql``;
+  // space-insensitive city match:
+  // compare replace(lower(l.city),' ','') LIKE %replace(lower(:city),' ','')%
+  const cityNorm = typeof city === 'string' && city.trim()
+    ? city.trim().toLowerCase().replace(/\s+/g, '')
+    : null;
+  const cityFilter = cityNorm
+    ? sql`AND REPLACE(LOWER(l.city), ' ', '') LIKE ${'%' + cityNorm + '%'}`
+    : sql``;
 
   const instantFilter =
     typeof instant === 'string'
@@ -77,7 +87,6 @@ app.get('/api/listings', async (req, res) => {
       LIMIT ${lim}
     `);
 
-    // Keep prior shape: an array, not { items: [...] }
     res.json(rows.rows);
   } catch (e) {
     console.error(e);
@@ -85,11 +94,7 @@ app.get('/api/listings', async (req, res) => {
   }
 });
 
-// -----------------------------------------------------------------------------
-// Listing details (one)
-// GET /api/listings/:id
-// Response shape: single object with photos array
-// -----------------------------------------------------------------------------
+// ---- Listing details ---------------------------------------------------------
 app.get('/api/listings/:id', async (req, res) => {
   const idNum = Number(req.params.id);
   if (!Number.isInteger(idNum)) return res.status(400).json({ error: 'invalid_id' });
@@ -118,10 +123,8 @@ app.get('/api/listings/:id', async (req, res) => {
   }
 });
 
-// -----------------------------------------------------------------------------
 // Boot
-// -----------------------------------------------------------------------------
 app.listen(ServerConfig.PORT, () => {
   console.log(`API on http://localhost:${ServerConfig.PORT}`);
-  console.log('Routes: GET /health, GET /api/listings, GET /api/listings/:id');
+  console.log('Routes: GET /health, GET /api/cities, GET /api/listings, GET /api/listings/:id');
 });
