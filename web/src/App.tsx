@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+
+
 
 type Photo = { url: string; alt: string | null };
 type Listing = {
@@ -34,12 +37,106 @@ export default function App() {
   const [min, setMin] = useState<string>("");
   const [max, setMax] = useState<string>("");
   const [instant, setInstant] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+
+
+  // paging derived from URL (default 8, not 24)
+  const limitFromUrl = searchParams.get("limit");
+  const limit = Math.min(50, Math.max(1, Number(limitFromUrl ?? "8")));
+  const page  = Math.max(1, Number(searchParams.get("page") ?? "1"));
+  const offset = (page - 1) * limit;
+
+  // If no `limit` in URL, set default 8 once on mount
+  useEffect(() => {
+    if (!limitFromUrl) {
+      const next = new URLSearchParams(searchParams);
+      next.set("limit", String(limit)); // 8 by default
+      next.set("page", "1");
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
+
+
+  // READ: whenever the URL changes (refresh/back/forward), load filters into state
+  useEffect(() => {
+    const qCity = searchParams.get("city") ?? "";
+    const qMin  = searchParams.get("min")  ?? "";
+    const qMax  = searchParams.get("max")  ?? "";
+    const qInst = searchParams.get("instant"); // "true"/"1" => true
+
+    const nextInstant = qInst === "true" || qInst === "1";
+
+    // only update when different (prevents unnecessary re-renders)
+    if (qCity !== city) setCity(qCity);
+    if (qMin  !== min)  setMin(qMin);
+    if (qMax  !== max)  setMax(qMax);
+    if (nextInstant !== instant) setInstant(nextInstant);
+
+    // we intentionally depend only on searchParams to avoid loops
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  // WRITE: when filters change, update the URL (debounced). Reset page=1 on filter change.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const prevLimit = searchParams.get("limit");
+      const sanitizedLimit = String(Math.min(50, Math.max(1, Number(prevLimit ?? "8"))));
+  
+      const prev = {
+        city:    searchParams.get("city") ?? "",
+        min:     searchParams.get("min")  ?? "",
+        max:     searchParams.get("max")  ?? "",
+        instant: searchParams.get("instant") ?? "",
+        limit:   sanitizedLimit,
+        page:    searchParams.get("page") ?? "",
+      };
+  
+      const target = {
+        city: city.trim(),
+        min:  min.trim() ? String(Number(min)) : "",
+        max:  max.trim() ? String(Number(max)) : "",
+        instant: instant ? "true" : "",
+        limit: sanitizedLimit,          // ✅ keep existing limit
+        page:  prev.page || "1",
+      };
+  
+      const filtersChanged =
+        prev.city    !== target.city ||
+        prev.min     !== target.min  ||
+        prev.max     !== target.max  ||
+        prev.instant !== target.instant;
+  
+      if (filtersChanged) target.page = "1";
+  
+      const next = new URLSearchParams();
+      if (target.city)    next.set("city", target.city);
+      if (target.min)     next.set("min", target.min);
+      if (target.max)     next.set("max", target.max);
+      if (target.instant) next.set("instant", target.instant);
+      if (target.limit)   next.set("limit", target.limit);
+      if (target.page)    next.set("page", target.page);
+  
+      const currStr = searchParams.toString();
+      const nextStr = next.toString();
+      if (currStr !== nextStr) setSearchParams(next, { replace: true });
+    }, 300);
+
+    return () => clearTimeout(t);
+    // IMPORTANT: keep deps like this—URL is the source of truth here   // eslint-disable-next-line react-hooks/exhaustive-deps
+
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [city, min, max, instant, searchParams, setSearchParams]);
 
   // data
   const [items, setItems] = useState<Listing[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pageInfo, setPageInfo] = useState<{
+    total: number; offset: number; limit: number; hasMore: boolean
+  } | null>(null);
 
   // splash control (first load only)
   const [firstLoadComplete, setFirstLoadComplete] = useState(false);
@@ -57,72 +154,88 @@ export default function App() {
   }, []);
 
   // Try to play chime (mp3 first; if not available or blocked, synth ding–dong)
-  async function tryPlayChime(): Promise<void> {
-    if (playedOnce.current) return;
+async function tryPlayChime(): Promise<void> {
+  if (playedOnce.current) return;
 
-    // 1) File-based chime if present
-    const el = audioRef.current;
-    if (el) {
-      try {
-        el.currentTime = 0;
-        el.volume = 0.45;
-        await el.play(); // may be blocked; if so, fall through
-        playedOnce.current = true;
-        return;
-      } catch {
-        /* ignore and try synth */
-      }
-    }
-
-    // 2) WebAudio "ding–dong" fallback (best-effort, may still be blocked silently)
+  // 1) File-based chime if present
+  const el = audioRef.current;
+  if (el) {
     try {
-      const AC = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const ctx = new AC();
-      await ctx.resume().catch(() => {});
-      const now = ctx.currentTime;
-
-      const playBell = (at: number, freq: number) => {
-        const o = ctx.createOscillator();
-        const g = ctx.createGain();
-        o.type = "sine";
-        // slight pitch shimmer
-        o.frequency.setValueAtTime(freq, at);
-        o.frequency.exponentialRampToValueAtTime(freq * 0.8, at + 0.18);
-
-        // ADSR
-        g.gain.setValueAtTime(0.0001, at);
-        g.gain.exponentialRampToValueAtTime(0.6, at + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.0001, at + 0.35);
-
-        o.connect(g);
-        g.connect(ctx.destination);
-        o.start(at);
-        o.stop(at + 0.4);
-      };
-
-      // Ding (higher) then Dong (lower)
-      playBell(now + 0.00, 880); // A5 ~ ding
-      playBell(now + 0.28, 659.25); // E5 ~ dong
-
+      el.pause();
+      el.currentTime = 0;
+      el.load();            // refresh buffer (helps in Vite dev)
+      el.volume = 0.45;
+      await el.play();      // will work after first user gesture
       playedOnce.current = true;
+      return;
     } catch {
-      // If even this fails, we just skip sound silently.
+      // fall through to synth
     }
   }
 
-  // Attempt to play chime on initial splash show
-  useEffect(() => { void tryPlayChime(); }, []);
+  // 2) WebAudio "ding–dong" fallback (best-effort)
+  try {
+    const AC = (window as any).AudioContext || (window as any).webkitAudioContext;
+    const ctx = new AC();
+    await ctx.resume().catch(() => {});
+    const now = ctx.currentTime;
 
+    const playBell = (at: number, freq: number) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      // slight pitch shimmer
+      o.frequency.setValueAtTime(freq, at);
+      o.frequency.exponentialRampToValueAtTime(freq * 0.8, at + 0.18);
+
+      // ADSR
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.exponentialRampToValueAtTime(0.6, at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + 0.35);
+
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start(at);
+      o.stop(at + 0.4);
+    };
+
+    // Ding (higher) then Dong (lower)
+    playBell(now + 0.00, 880);     // A5 ~ ding
+    playBell(now + 0.28, 659.25);  // E5 ~ dong
+
+    playedOnce.current = true;
+  } catch {
+    // If even this fails, skip silently.
+  }
+}
+
+  // Play the chime once after the first user interaction (required by browsers)
+  useEffect(() => {
+    const arm = () => {
+      window.removeEventListener("pointerdown", arm);
+      window.removeEventListener("keydown", arm);
+      void tryPlayChime();
+    };
+    window.addEventListener("pointerdown", arm, { passive: true });
+    window.addEventListener("keydown", arm);
+    return () => {
+      window.removeEventListener("pointerdown", arm);
+      window.removeEventListener("keydown", arm);
+    };
+  }, []);
+
+  
   // query params
   const params = useMemo(() => {
     const p = new URLSearchParams();
     if (city.trim()) p.set("city", city.trim());
-    if (min.trim()) p.set("min", String(Number(min)));
-    if (max.trim()) p.set("max", String(Number(max)));
-    if (instant) p.set("instant", "true");
-    p.set("limit", "24");
+    if (min.trim())  p.set("min", String(Number(min)));
+    if (max.trim())  p.set("max", String(Number(max)));
+    if (instant)     p.set("instant", "true");
+    p.set("limit", String(limit)); // use derived limit from URL
     return p;
-  }, [city, min, max, instant]);
+  }, [city, min, max, instant, limit]);
+  
 
   // fetch list
   useEffect(() => {
@@ -131,11 +244,40 @@ export default function App() {
       try {
         setError(null);
         setLoading(true);
-        setItems(null);
-        const res = await fetch(`${API}/api/listings?${params.toString()}`, { signal: controller.signal });
+  
+        // Build API params: reuse filters + add offset
+        const apiParams = new URLSearchParams(params);
+        apiParams.set("offset", String(offset));
+  
+        const res = await fetch(`${API}/api/listings?${apiParams.toString()}`, { signal: controller.signal });
         if (!res.ok) throw new Error("Bad response");
-        const data: Listing[] = await res.json();
-        setItems(data);
+  
+        const payload = await res.json() as {
+          data: Listing[];
+          page: { total: number; offset: number; limit: number; hasMore: boolean };
+        };
+        
+        const total = payload.page.total;
+        const lastPage = Math.max(1, Math.ceil(total / limit));
+        
+        // If we’re on a page whose offset is beyond the total, snap to the last valid page.
+        // Example: city=George Town has only 5 results, but URL says page=2 (offset=8) → empty.
+        // This will rewrite ?page=2 → ?page=1 (or last page), then refetch.
+        if (total > 0 && offset >= total) {
+          const next = new URLSearchParams(searchParams);
+          next.set("page", String(lastPage));
+          setSearchParams(next, { replace: true });
+          return; // let the effect re-run with the corrected page
+        }
+        
+        setPageInfo(payload.page);
+        
+        // Replace on first page; append on subsequent pages
+        setItems(prev =>
+          (page <= 1 || !prev) ? payload.data : [...prev, ...payload.data]
+        );
+        
+  
         if (!firstLoadComplete) setFirstLoadComplete(true);
       } catch (e: any) {
         if (e.name !== "AbortError") setError("Failed to load listings");
@@ -144,7 +286,9 @@ export default function App() {
       }
     })();
     return () => controller.abort();
-  }, [params]);
+    // Re-fetch when filters (params) or paging (offset) change
+  }, [params, offset]);
+  
 
   // fade out splash once first load + min delay are both done
   useEffect(() => {
@@ -160,7 +304,7 @@ export default function App() {
   return (
     <div style={{ background: COLORS.bg, minHeight: "100dvh" }}>
       {/* Hidden audio element (will play if file exists & autoplay allowed) */}
-      <audio ref={audioRef} src="/sfx/sleepinn-chime.mp3" preload="auto" />
+      <audio ref={audioRef} src="/sfx/door-bell.mp3" preload="metadata" />
 
       {/* SPLASH (first load only) */}
       {showSplash && (
@@ -331,152 +475,92 @@ export default function App() {
         {items && items.length === 0 && <div style={{ marginTop: 16 }}>No listings match your filters.</div>}
 
         {/* Grid */}
-        {items && items.length > 0 && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
-              gap: 14,
-              marginTop: 16,
-            }}
-          >
-            {items.map((l) => (
-              <article
-                key={l.id}
-                onClick={() => setSelected(l)}
-                style={{
-                  cursor: "pointer",
-                  border: `1px solid ${COLORS.border}`,
-                  borderRadius: 14,
-                  overflow: "hidden",
-                  background: COLORS.card,
-                  transition: "transform 120ms ease, box-shadow 120ms ease",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.boxShadow = `0 10px 28px rgba(0,0,0,0.35)`;
-                  e.currentTarget.style.transform = "translateY(-2px)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.boxShadow = "none";
-                  e.currentTarget.style.transform = "none";
-                }}
-              >
-                {l.photos?.[0]?.url ? (
-                  <img
-                    src={l.photos[0].url}
-                    alt={l.photos[0].alt ?? ""}
-                    style={{ width: "100%", height: 180, objectFit: "cover" }}
-                  />
-                ) : (
-                  <div style={{ width: "100%", height: 180, background: COLORS.panel }} />
-                )}
-                <div style={{ padding: 12 }}>
-                  <div style={{ fontWeight: 800, color: COLORS.text }}>{l.title}</div>
-                  <div style={{ color: COLORS.sub }}>{l.city}, {l.country}</div>
-                  <div style={{ marginTop: 8 }}>
-                    <b style={{ color: COLORS.gold }}>
-                      RM {Number(l.price_per_night).toFixed(2)}
-                    </b>{" "}
-                    <span style={{ color: COLORS.sub }}>/ night · {l.beds} beds · {l.baths} baths</span>
-                  </div>
-                  {l.is_instant_book && (
-                    <div style={{ marginTop: 6, fontSize: 12, color: COLORS.gold }}>Instant book</div>
-                  )}
-                </div>
-              </article>
-            ))}
-          </div>
-        )}
-
-        {/* Details Panel */}
-        {selected && (
-          <div
-            onClick={() => setSelected(null)}
-            style={{
-              position: "fixed",
-              inset: 0,
-              background: "rgba(6,12,20,0.7)",
-              display: "flex",
-              justifyContent: "center",
-              alignItems: "center",
-              padding: 16,
-              zIndex: 50,
-            }}
-          >
-            <div
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                width: "min(1000px, 96vw)",
-                maxHeight: "90vh",
-                overflow: "auto",
-                background: COLORS.panel,
-                color: COLORS.text,
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 16,
-                padding: 16,
-                boxShadow: "0 20px 50px rgba(0,0,0,0.5)",
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <h2 style={{ fontSize: 22, fontWeight: 900 }}>
-                  <span>{selected.title}</span>
-                </h2>
-                <button
-                  onClick={() => setSelected(null)}
-                  style={{
-                    border: `1px solid ${COLORS.gold}`,
-                    borderRadius: 10,
-                    padding: "8px 12px",
-                    background: COLORS.gold,
-                    color: COLORS.bg,
-                    fontWeight: 800,
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = COLORS.goldDark)}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = COLORS.gold)}
-                >
-                  Close
-                </button>
-              </div>
-
-              <div style={{ color: COLORS.sub }}>{selected.city}, {selected.country}</div>
-
-              <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                <span style={{ color: COLORS.text }}>
-                  RM <b style={{ color: COLORS.gold }}>{Number(selected.price_per_night).toFixed(2)}</b> / night
-                </span>
-                <span style={{ color: COLORS.sub }}>• {selected.beds} beds</span>
-                <span style={{ color: COLORS.sub }}>• {selected.baths} baths</span>
-                {selected.is_instant_book && <span style={{ color: COLORS.gold }}>• Instant book</span>}
-              </div>
-
-              {/* Gallery */}
-              <div
-                style={{
-                  marginTop: 12,
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(240px,1fr))",
-                  gap: 10,
-                }}
-              >
-                {selected.photos.map((p, i) => (
-                  <img
-                    key={i}
-                    src={p.url}
-                    alt={p.alt ?? ""}
-                    style={{ width: "100%", aspectRatio: "16/10", objectFit: "cover", borderRadius: 10 }}
-                  />
-                ))}
-              </div>
-
-              {selected.description && (
-                <>
-                  <h3 style={{ marginTop: 16, fontWeight: 800, color: COLORS.text }}>About this place</h3>
-                  <p style={{ marginTop: 6, lineHeight: 1.6, color: COLORS.sub }}>{selected.description}</p>
-                </>
-              )}
+{items && items.length > 0 && (
+  <>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
+        gap: 14,
+        marginTop: 16,
+      }}
+    >
+      {items.map((l) => (
+        <article
+          key={l.id}
+          onClick={() => navigate({ pathname: `/listing/${l.id}`, search: searchParams.toString() })}
+          style={{
+            cursor: "pointer",
+            border: `1px solid ${COLORS.border}`,
+            borderRadius: 14,
+            overflow: "hidden",
+            background: COLORS.card,
+            transition: "transform 120ms ease, box-shadow 120ms ease",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.boxShadow = `0 10px 28px rgba(0,0,0,0.35)`;
+            e.currentTarget.style.transform = "translateY(-2px)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.boxShadow = "none";
+            e.currentTarget.style.transform = "none";
+          }}
+        >
+          {l.photos?.[0]?.url ? (
+            <img
+              src={l.photos[0].url}
+              alt={l.photos[0].alt ?? ""}
+              style={{ width: "100%", height: 180, objectFit: "cover" }}
+            />
+          ) : (
+            <div style={{ width: "100%", height: 180, background: COLORS.panel }} />
+          )}
+          <div style={{ padding: 12 }}>
+            <div style={{ fontWeight: 800, color: COLORS.text }}>{l.title}</div>
+            <div style={{ color: COLORS.sub }}>{l.city}, {l.country}</div>
+            <div style={{ marginTop: 8 }}>
+              <b style={{ color: COLORS.gold }}>
+                RM {Number(l.price_per_night).toFixed(2)}
+              </b>{" "}
+              <span style={{ color: COLORS.sub }}>/ night · {l.beds} beds · {l.baths} baths</span>
             </div>
+            {l.is_instant_book && (
+              <div style={{ marginTop: 6, fontSize: 12, color: COLORS.gold }}>Instant book</div>
+            )}
           </div>
-        )}
+        </article>
+      ))}
+    </div>
+
+    {/* Load more */}
+    {pageInfo?.hasMore && (
+      <div style={{ display: "flex", justifyContent: "center", margin: "18px 0 8px" }}>
+        <button
+          onClick={() => {
+            const next = new URLSearchParams(searchParams);
+            const currPage = Math.max(1, Number(next.get("page") ?? "1"));
+            next.set("page", String(currPage + 1));
+            setSearchParams(next, { replace: false }); // keep history for page steps
+          }}
+          style={{
+            padding: "10px 16px",
+            borderRadius: 10,
+            border: `1px solid ${COLORS.gold}`,
+            color: COLORS.bg,
+            background: COLORS.gold,
+            fontWeight: 800,
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = COLORS.goldDark)}
+          onMouseLeave={(e) => (e.currentTarget.style.background = COLORS.gold)}
+          disabled={loading}
+        >
+          {loading ? "Loading..." : "Load more"}
+        </button>
+      </div>
+    )}
+  </>
+)}
+
       </main>
     </div>
   );
