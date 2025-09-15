@@ -117,6 +117,10 @@ export default function App() {
       if (target.instant) next.set("instant", target.instant);
       if (target.limit)   next.set("limit", target.limit);
       if (target.page)    next.set("page", target.page);
+
+      // keep current sort in the URL (so our writer doesn’t wipe it out)
+      const currSort = searchParams.get("sort");
+      if (currSort) next.set("sort", currSort);
   
       const currStr = searchParams.toString();
       const nextStr = next.toString();
@@ -248,7 +252,9 @@ async function tryPlayChime(): Promise<void> {
         // Build API params: reuse filters + add offset
         const apiParams = new URLSearchParams(params);
         apiParams.set("offset", String(offset));
-  
+        const sort = searchParams.get("sort") ?? "";
+        if (sort) apiParams.set("sort", sort);
+        
         const res = await fetch(`${API}/api/listings?${apiParams.toString()}`, { signal: controller.signal });
         if (!res.ok) throw new Error("Bad response");
   
@@ -287,7 +293,7 @@ async function tryPlayChime(): Promise<void> {
     })();
     return () => controller.abort();
     // Re-fetch when filters (params) or paging (offset) change
-  }, [params, offset]);
+  }, [params, offset, searchParams]);
   
 
   // fade out splash once first load + min delay are both done
@@ -451,6 +457,53 @@ async function tryPlayChime(): Promise<void> {
             Instant book
           </label>
 
+
+          {/* SORT (URL-synced) */}
+          <label style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: 6, color: COLORS.text }}>
+            <span>Sort</span>
+            <select
+              value={searchParams.get("sort") ?? ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                const next = new URLSearchParams(searchParams);
+                if (v) next.set("sort", v); else next.delete("sort");
+                next.set("page", "1");                // reset to first page when sort changes
+                setSearchParams(next, { replace: true });
+              }}
+            >
+              <option value="">— Sort —</option>
+              <option value="price_asc">Price: Low → High</option>
+              <option value="price_desc">Price: High → Low</option>
+              <option value="newest">Newest</option>
+            </select>
+          </label>
+
+
+          {/* LIMIT (URL-synced) */}
+          <label style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: 6, color: COLORS.text }}>
+            <span>Per page</span>
+            <select
+              value={(() => {
+                const v = searchParams.get("limit");
+                return v ?? "8"; // default
+              })()}
+              onChange={(e) => {
+                const v = e.target.value; // "8" | "12" | "24" | "48"
+                const next = new URLSearchParams(searchParams);
+                next.set("limit", v);
+                next.set("page", "1"); // reset to first page when page size changes
+                setSearchParams(next, { replace: true });
+              }}
+            >
+              <option value="8">8</option>
+              <option value="12">12</option>
+              <option value="24">24</option>
+              <option value="48">48</option>
+            </select>
+          </label>
+
+
+
           <button
             onClick={resetFilters}
             style={{
@@ -510,6 +563,7 @@ async function tryPlayChime(): Promise<void> {
             <img
               src={l.photos[0].url}
               alt={l.photos[0].alt ?? ""}
+              loading="lazy" 
               style={{ width: "100%", height: 180, objectFit: "cover" }}
             />
           ) : (
