@@ -38,9 +38,20 @@ app.get('/api/cities', async (_req, res) => {
 // - price_per_night is TEXT in DB → CAST to NUMERIC for numeric filters
 // - city filter is "space-insensitive": 'georgetown' matches 'George Town'
 app.get('/api/listings', async (req, res) => {
-  const { city, min, max, instant, limit, offset } =
+  const { city, min, max, instant, limit, offset, sort } =
     req.query as Record<string, string | undefined>;
 
+  // whitelist sort values → map to real SQL using your schema
+  // price → 'price_per_night'  |  newest → 'id'
+  const SORT_MAP: Record<string, string> = {
+    price_asc:  'price_per_night ASC',
+    price_desc: 'price_per_night DESC',
+    newest:     'id DESC',
+  };
+
+  // Pick the ORDER BY string or default (stable default)
+  const orderBy = SORT_MAP[sort ?? ''] ?? 'id ASC';
+  
   const DEFAULT_LIMIT = 24;
   const MAX_LIMIT = 50;
   const MIN_PRICE = 0;
@@ -88,7 +99,7 @@ app.get('/api/listings', async (req, res) => {
     FROM listings
     WHERE 1=1
     ${whereFrag}
-    ORDER BY id DESC
+    ORDER BY ${sql.raw(orderBy)}
     OFFSET ${off}
     LIMIT ${lim}
   `);
