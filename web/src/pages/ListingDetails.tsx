@@ -57,6 +57,18 @@ export default function ListingDetails() {
     return () => { aborted = true; };
   }, [id]);
 
+  // Close overlay with Esc
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        navigate({ pathname: "/", search: search.toString() });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navigate, search]);
+
+
   return (
     <div
       style={{
