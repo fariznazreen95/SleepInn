@@ -1,7 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
-
+// Add once at the top-level, e.g., after imports:
+const styleEl = document.getElementById("sleepinn-blurup-style") ?? (() => {
+  const el = document.createElement("style");
+  el.id = "sleepinn-blurup-style";
+  el.textContent = `
+    @keyframes shimmer { 
+      0% { background-position: 0% 0; }
+      100% { background-position: 200% 0; }
+    }
+  `;
+  document.head.appendChild(el);
+  return el;
+})();
 
 type Photo = { url: string; alt: string | null };
 type Listing = {
@@ -31,6 +43,203 @@ const COLORS = {
   goldDark: "#caa50a",
 };
 
+// base reset: remove white body margin + ensure dark bg edge-to-edge
+const baseCSS = document.getElementById("sleepinn-base-style") ?? (() => {
+  const el = document.createElement("style");
+  el.id = "sleepinn-base-style";
+  el.textContent = `
+    html, body, #root { height: 100%; }
+    body { margin: 0; background: ${COLORS.bg}; }
+  `;
+  document.head.appendChild(el);
+  return el;
+})();
+
+// one-time style for nicer <select>
+const selectCSS = document.getElementById("sleepinn-select-style") ?? (() => {
+  const el = document.createElement("style");
+  el.id = "sleepinn-select-style";
+  el.textContent = `
+    .si-select{
+      appearance: none; -webkit-appearance: none; -moz-appearance: none;
+      background: ${COLORS.bg};
+      color: ${COLORS.text};
+      border: 1px solid ${COLORS.border};
+      border-radius: 10px;
+      padding: 8px 36px 8px 10px;
+      line-height: 1.2;
+    }
+    .si-select:focus{ outline: none; box-shadow: 0 0 0 2px ${COLORS.gold}; border-color: ${COLORS.gold}; }
+    .si-select::-ms-expand{ display: none; }
+    .si-select{
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M1 3.5 L5 7 L9 3.5' stroke='${encodeURIComponent(COLORS.text)}' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      background-size: 10px 10px;
+    }
+  `;
+  document.head.appendChild(el);
+  return el;
+})();
+
+// ---- Rounded dropdown (custom select) ---------------------------------------
+type Option = { value: string; label: string };
+
+function UiSelect({
+  value,
+  onChange,
+  options,
+  width = 160,
+  ariaLabel,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: Option[];
+  width?: number;
+  ariaLabel?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hoverIdx, setHoverIdx] = useState(
+    Math.max(0, options.findIndex((o) => o.value === value))
+  );
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!btnRef.current || !menuRef.current) return;
+      if (!btnRef.current.contains(t) && !menuRef.current.contains(t)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, []);
+
+  useEffect(() => {
+    if (open) {
+      setHoverIdx(Math.max(0, options.findIndex((o) => o.value === value)));
+    }
+  }, [open, value, options]);
+
+  const choose = (v: string) => {
+    onChange(v);
+    setOpen(false);
+  };
+
+  return (
+    <div style={{ position: "relative", width }}>
+      <button
+        ref={btnRef}
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setOpen(true);
+            setHoverIdx((i) => Math.min(options.length - 1, (i ?? 0) + 1));
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setOpen(true);
+            setHoverIdx((i) => Math.max(0, (i ?? 0) - 1));
+          } else if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            if (open) choose(options[hoverIdx]?.value ?? value);
+            else setOpen(true);
+          } else if (e.key === "Escape") {
+            setOpen(false);
+          }
+        }}
+        style={{
+          width: "100%",
+          textAlign: "left",
+          padding: "8px 36px 8px 10px",
+          borderRadius: 10,
+          border: `1px solid ${COLORS.border}`,
+          background: COLORS.bg,
+          color: COLORS.text,
+          position: "relative",
+        }}
+      >
+        <span>
+          {options.find((o) => o.value === value)?.label ?? "— Select —"}
+        </span>
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            right: 10,
+            top: "50%",
+            transform: "translateY(-50%)",
+          }}
+        >
+          ▾
+        </span>
+      </button>
+
+      {open && (
+        <div
+          ref={menuRef}
+          role="listbox"
+          tabIndex={-1}
+          style={{
+            position: "absolute",
+            zIndex: 10, // above the Reset button (which is zIndex:2)
+            top: "calc(100% + 6px)",
+            left: 0,
+            width: "100%",
+            maxHeight: 240,
+            overflowY: "auto",
+            background: COLORS.bg,
+            color: COLORS.text,
+            border: `1px solid ${COLORS.border}`,
+            borderRadius: 10, // <-- rounded dropdown panel
+            boxShadow: "0 10px 24px rgba(0,0,0,0.35)",
+          }}
+        >
+          {options.map((opt, idx) => {
+            const active = value === opt.value;
+            const hover = idx === hoverIdx;
+            return (
+                <div
+                  key={opt.value}
+                  role="option"
+                  aria-selected={active}
+                  onMouseEnter={() => setHoverIdx(idx)}
+                  // choose on press (works for mouse + touch/pen), then swallow event so it doesn't re-toggle
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    choose(opt.value); // this sets open=false
+                  }}
+                  style={{
+                    padding: "8px 10px",
+                    cursor: "pointer",
+                    background: hover ? COLORS.panel : "transparent",
+                    fontWeight: active ? 800 : 500,
+                    borderBottom:
+                      idx < options.length - 1
+                        ? `1px solid ${COLORS.border}`
+                        : "none",
+                  }}
+                >
+                  {opt.label}
+                </div>
+
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function App() {
   // filters
   const [city, setCity] = useState("");
@@ -39,8 +248,7 @@ export default function App() {
   const [instant, setInstant] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-
-
+ 
   // paging derived from URL (default 8, not 24)
   const limitFromUrl = searchParams.get("limit");
   const limit = Math.min(50, Math.max(1, Number(limitFromUrl ?? "8")));
@@ -141,6 +349,29 @@ export default function App() {
   const [pageInfo, setPageInfo] = useState<{
     total: number; offset: number; limit: number; hasMore: boolean
   } | null>(null);
+
+// Restore scroll position if we have one saved for the current filter URL
+useEffect(() => {
+  if (!items || items.length === 0) return;
+
+  const key = `gridScroll:${searchParams.toString()}`;
+  const saved = sessionStorage.getItem(key);
+  if (!saved) return;
+
+  const y = Number(saved) || 0;
+
+  // Let layout paint before scrolling back
+  requestAnimationFrame(() => {
+    window.scrollTo({ top: y, behavior: "auto" });
+    // one more frame just in case images/layout expand
+    requestAnimationFrame(() => window.scrollTo({ top: y, behavior: "auto" }));
+  });
+
+  // consume it so it doesn't keep forcing position
+  sessionStorage.removeItem(key);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [items, searchParams]);
+
 
   // splash control (first load only)
   const [firstLoadComplete, setFirstLoadComplete] = useState(false);
@@ -305,7 +536,20 @@ async function tryPlayChime(): Promise<void> {
     }
   }, [firstLoadComplete, minDelayDone, showSplash]);
 
-  const resetFilters = () => { setCity(""); setMin(""); setMax(""); setInstant(false); };
+  const resetFilters = () => {
+    // clear URL filters and snap to defaults
+    const next = new URLSearchParams();
+    next.set("page", "1");
+    next.set("limit", "8"); // keep default explicit
+    setSearchParams(next, { replace: true });
+  
+    // local inputs (will sync from URL too)
+    setCity(""); setMin(""); setMax(""); setInstant(false);
+  
+    // UX: scroll to top of grid
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  
 
   return (
     <div style={{ background: COLORS.bg, minHeight: "100dvh" }}>
@@ -393,12 +637,14 @@ async function tryPlayChime(): Promise<void> {
           style={{
             display: "flex",
             flexWrap: "wrap",
-            gap: 10,
-            alignItems: "end",
+            gap: 12,
+            alignItems: "center",
             background: COLORS.panel,
             border: `1px solid ${COLORS.border}`,
-            padding: 12,
-            borderRadius: 14,
+            padding: 14,
+            borderRadius: 12,
+            position: "relative",
+            paddingRight: 96,
           }}
         >
           <div style={{ display: "flex", flexDirection: "column" }}>
@@ -461,45 +707,70 @@ async function tryPlayChime(): Promise<void> {
           {/* SORT (URL-synced) */}
           <label style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: 6, color: COLORS.text }}>
             <span>Sort</span>
-            <select
+            <UiSelect
+              ariaLabel="Sort"
+              width={180}
               value={searchParams.get("sort") ?? ""}
-              onChange={(e) => {
-                const v = e.target.value;
+              onChange={(v) => {
                 const next = new URLSearchParams(searchParams);
                 if (v) next.set("sort", v); else next.delete("sort");
-                next.set("page", "1");                // reset to first page when sort changes
+                next.set("page", "1");
                 setSearchParams(next, { replace: true });
               }}
-            >
-              <option value="">— Sort —</option>
-              <option value="price_asc">Price: Low → High</option>
-              <option value="price_desc">Price: High → Low</option>
-              <option value="newest">Newest</option>
-            </select>
+              options={[
+                { value: "", label: "— Sort —" },
+                { value: "price_asc", label: "Price: Low → High" },
+                { value: "price_desc", label: "Price: High → Low" },
+                { value: "newest", label: "Newest" },
+              ]}
+            />
           </label>
+
+          {(searchParams.get("sort") ?? "") === "newest" && (
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                height: 26,
+                padding: "0 10px",
+                fontSize: 12,
+                fontWeight: 700,
+                letterSpacing: 0.3,
+                color: COLORS.bg,
+                background: COLORS.gold,
+                border: `1px solid ${COLORS.goldDark}`,
+                borderRadius: 999,
+                marginLeft: 6,
+                userSelect: "none",
+              }}
+              aria-label="Newest sort active"
+              title="Sorted by newest"
+            >
+              Newest
+            </span>
+          )}
 
 
           {/* LIMIT (URL-synced) */}
           <label style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: 6, color: COLORS.text }}>
             <span>Per page</span>
-            <select
-              value={(() => {
-                const v = searchParams.get("limit");
-                return v ?? "8"; // default
-              })()}
-              onChange={(e) => {
-                const v = e.target.value; // "8" | "12" | "24" | "48"
+            <UiSelect
+              ariaLabel="Per page"
+              width={90}
+              value={searchParams.get("limit") ?? "8"}
+              onChange={(v) => {
                 const next = new URLSearchParams(searchParams);
                 next.set("limit", v);
-                next.set("page", "1"); // reset to first page when page size changes
+                next.set("page", "1");
                 setSearchParams(next, { replace: true });
               }}
-            >
-              <option value="8">8</option>
-              <option value="12">12</option>
-              <option value="24">24</option>
-              <option value="48">48</option>
-            </select>
+              options={[
+                { value: "8",  label: "8" },
+                { value: "12", label: "12" },
+                { value: "24", label: "24" },
+                { value: "48", label: "48" },
+              ]}
+            />
           </label>
 
 
@@ -507,13 +778,16 @@ async function tryPlayChime(): Promise<void> {
           <button
             onClick={resetFilters}
             style={{
-              marginLeft: "auto",
+              position: "absolute",
+              right: 14,
+              top: 14,
               padding: "10px 14px",
               borderRadius: 10,
               border: `1px solid ${COLORS.gold}`,
               color: COLORS.bg,
               background: COLORS.gold,
               fontWeight: 700,
+              zIndex: 2,
             }}
             onMouseEnter={(e) => (e.currentTarget.style.background = COLORS.goldDark)}
             onMouseLeave={(e) => (e.currentTarget.style.background = COLORS.gold)}
@@ -541,7 +815,14 @@ async function tryPlayChime(): Promise<void> {
       {items.map((l) => (
         <article
           key={l.id}
-          onClick={() => navigate({ pathname: `/listing/${l.id}`, search: searchParams.toString() })}
+         
+          onClick={() => {
+            // remember current grid scroll so we can restore after closing details
+            const key = `gridScroll:${searchParams.toString()}`;
+            sessionStorage.setItem(key, String(window.scrollY));
+            navigate({ pathname: `/listing/${l.id}`, search: searchParams.toString() });
+          }}
+          
           style={{
             cursor: "pointer",
             border: `1px solid ${COLORS.border}`,
@@ -561,11 +842,33 @@ async function tryPlayChime(): Promise<void> {
         >
           {l.photos?.[0]?.url ? (
             <img
-              src={l.photos[0].url}
-              alt={l.photos[0].alt ?? ""}
-              loading="lazy" 
-              style={{ width: "100%", height: 180, objectFit: "cover" }}
-            />
+            src={l.photos[0].url}
+            alt={l.photos[0].alt ?? ""}
+            loading="lazy"
+            // Start slightly blurred & scaled, then remove on load
+            style={{
+              width: "100%",
+              height: 180,
+              objectFit: "cover",
+              filter: "blur(16px)",
+              transform: "scale(1.02)",
+              transition: "filter 220ms ease, transform 220ms ease, opacity 220ms ease",
+              // Optional: faint shimmer to hint loading
+              background:
+                "linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.08), rgba(255,255,255,0.04))",
+              backgroundSize: "200% 100%",
+              animation: "shimmer 0.9s linear infinite",
+            }}
+            onLoad={(e) => {
+              const el = e.currentTarget as HTMLImageElement;
+              // remove blur + scale once the real image is ready
+              el.style.filter = "none";
+              el.style.transform = "none";
+              el.style.animation = "none";
+              el.style.background = "none";
+            }}
+          />
+
           ) : (
             <div style={{ width: "100%", height: 180, background: COLORS.panel }} />
           )}
