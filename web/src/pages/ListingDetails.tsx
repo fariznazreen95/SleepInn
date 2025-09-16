@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 type Photo = { url: string; alt: string | null };
@@ -35,6 +35,49 @@ export default function ListingDetails() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
+  // ---- Hover preview overlay state -----------------------------------------
+  const [hoverSrc, setHoverSrc] = useState<string | null>(null);
+  const hideTimer = useRef<number | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const overlayImgRef = useRef<HTMLImageElement | null>(null);
+
+  const cancelHide = () => {
+    if (hideTimer.current) {
+      clearTimeout(hideTimer.current);
+      hideTimer.current = null;
+    }
+  };
+  const scheduleHide = () => {
+    cancelHide();
+    hideTimer.current = window.setTimeout(() => setHoverSrc(null), 140);
+  };
+
+  // Animate the preview overlay in when it appears
+  useEffect(() => {
+    if (!hoverSrc) return;
+    requestAnimationFrame(() => {
+      if (overlayRef.current) overlayRef.current.style.opacity = "1";
+      if (overlayImgRef.current) {
+        overlayImgRef.current.style.opacity = "1";
+        overlayImgRef.current.style.transform = "scale(1)";
+      }
+    });
+  }, [hoverSrc]);
+
+  // When preview is open, let Escape close the preview (not the whole details)
+  useEffect(() => {
+    if (!hoverSrc) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setHoverSrc(null);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [hoverSrc]);
+
+  // ---- Fetch item -----------------------------------------------------------
   useEffect(() => {
     let aborted = false;
     (async () => {
@@ -57,17 +100,16 @@ export default function ListingDetails() {
     return () => { aborted = true; };
   }, [id]);
 
-  // Close overlay with Esc
+  // Close details overlay with Esc
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !hoverSrc) {
         navigate({ pathname: "/", search: search.toString() });
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navigate, search]);
-
+  }, [navigate, search, hoverSrc]);
 
   return (
     <div
@@ -134,6 +176,7 @@ export default function ListingDetails() {
               {item.is_instant_book && <span style={{ color: COLORS.gold }}>• Instant book</span>}
             </div>
 
+            {/* Gallery */}
             <div
               style={{
                 marginTop: 12,
@@ -143,12 +186,28 @@ export default function ListingDetails() {
               }}
             >
               {item.photos.map((p, i) => (
-                <img
+                <div
                   key={i}
-                  src={p.url}
-                  alt={p.alt ?? ""}
-                  style={{ width: "100%", aspectRatio: "16/10", objectFit: "cover", borderRadius: 10 }}
-                />
+                  style={{
+                    borderRadius: 10,
+                    overflow: "hidden",
+                    position: "relative",
+                    cursor: "zoom-in",
+                  }}
+                  onMouseEnter={() => { cancelHide(); setHoverSrc(p.url); }}
+                  onMouseLeave={scheduleHide}
+                >
+                  <img
+                    src={p.url}
+                    alt={p.alt ?? ""}
+                    style={{
+                      width: "100%",
+                      aspectRatio: "16/10",
+                      objectFit: "cover",
+                      display: "block",
+                    }}
+                  />
+                </div>
               ))}
             </div>
 
@@ -161,6 +220,42 @@ export default function ListingDetails() {
           </>
         )}
       </div>
+
+      {/* Hover preview overlay (centered) */}
+      {hoverSrc && (
+        <div
+          ref={overlayRef}
+          onMouseEnter={cancelHide}
+          onMouseLeave={scheduleHide}
+          onClick={(e) => { e.stopPropagation(); setHoverSrc(null); }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            display: "grid",
+            placeItems: "center",
+            background: "rgba(0,0,0,0.45)",
+            zIndex: 2000,
+            opacity: 0, // animate to 1
+            transition: "opacity 160ms ease",
+            cursor: "zoom-out",
+          }}
+        >
+          <img
+            ref={overlayImgRef}
+            src={hoverSrc}
+            alt=""
+            style={{
+              maxWidth: "min(92vw, 1100px)",
+              maxHeight: "86vh",
+              borderRadius: 12,
+              boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+              transform: "scale(0.98)", // animate to 1
+              opacity: 0,               // animate to 1
+              transition: "transform 180ms ease, opacity 180ms ease",
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }
