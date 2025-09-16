@@ -6,3 +6,8 @@ build/
 server/.env
 web/.env
 .env
+
+# env
+.env
+**/.env
+
