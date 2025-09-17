@@ -344,6 +344,77 @@ export default function App() {
 
   // data
   const [items, setItems] = useState<Listing[] | null>(null);
+
+  // Clear the current list when filters/sort change and page is 1
+  useEffect(() => {
+    if (page === 1) setItems(null);
+  }, [city, min, max, instant, searchParams]);
+  
+  // --- Hover Preview State (overlay controller) ---
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewListing, setPreviewListing] = useState<Listing | null>(null);
+  const [previewIdx, setPreviewIdx] = useState(0);
+
+  // to avoid flicker when moving pointer from card → overlay
+  const closePreviewTimer = useRef<number | null>(null);
+  const requestIdRef = useRef(0);
+
+
+  // open preview for a listing at photo index
+  function openPreview(listing: Listing, idx = 0) {
+    if (closePreviewTimer.current) {
+      window.clearTimeout(closePreviewTimer.current);
+      closePreviewTimer.current = null;
+    }
+    setPreviewListing(listing);
+    setPreviewIdx(Math.max(0, Math.min(idx, (listing.photos?.length ?? 1) - 1)));
+    setPreviewOpen(true);
+  }
+
+  // schedule a gentle close (lets user move into the overlay)
+  function scheduleClosePreview(delayMs = 120) {
+    if (closePreviewTimer.current) window.clearTimeout(closePreviewTimer.current);
+    closePreviewTimer.current = window.setTimeout(() => {
+      setPreviewOpen(false);
+      setPreviewListing(null);
+    }, delayMs) as unknown as number;
+  }
+
+  // hard close (Esc)
+  function closePreviewNow() {
+    if (closePreviewTimer.current) window.clearTimeout(closePreviewTimer.current);
+    closePreviewTimer.current = null;
+    if ((window as any).__hoverTimer) {
+      clearTimeout((window as any).__hoverTimer);
+      (window as any).__hoverTimer = null;
+    }
+        setPreviewOpen(false);
+    setPreviewListing(null);
+  }
+
+  // keyboard: ←/→ cycle, Esc closes
+  useEffect(() => {
+    if (!previewOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (!previewListing) return;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        const n = (previewListing.photos?.length ?? 1);
+        if (n > 1) setPreviewIdx((i) => (i - 1 + n) % n);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        const n = (previewListing.photos?.length ?? 1);
+        if (n > 1) setPreviewIdx((i) => (i + 1) % n);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        closePreviewNow();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [previewOpen, previewListing]);
+
+
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState<{
@@ -474,6 +545,7 @@ async function tryPlayChime(): Promise<void> {
 
   // fetch list
   useEffect(() => {
+    const id = ++requestIdRef.current; // tag this request as the latest
     const controller = new AbortController();
     (async () => {
       try {
@@ -482,6 +554,7 @@ async function tryPlayChime(): Promise<void> {
   
         // Build API params: reuse filters + add offset
         const apiParams = new URLSearchParams(params);
+        apiParams.set("limit", String(limit));
         apiParams.set("offset", String(offset));
         const sort = searchParams.get("sort") ?? "";
         if (sort) apiParams.set("sort", sort);
@@ -493,7 +566,9 @@ async function tryPlayChime(): Promise<void> {
           data: Listing[];
           page: { total: number; offset: number; limit: number; hasMore: boolean };
         };
-        
+      
+        if (id !== requestIdRef.current) return; // a newer request finished, ignore this one
+
         const total = payload.page.total;
         const lastPage = Math.max(1, Math.ceil(total / limit));
         
@@ -508,19 +583,21 @@ async function tryPlayChime(): Promise<void> {
         }
         
         setPageInfo(payload.page);
-        
-        // Replace on first page; append on subsequent pages
-        setItems(prev =>
-          (page <= 1 || !prev) ? payload.data : [...prev, ...payload.data]
-        );
-        
+
+        // Fresh replace on page 1; append on subsequent pages
+        if (page === 1) {
+          setItems(payload.data);
+        } else {
+          setItems(prev => [...(prev ?? []), ...payload.data]);
+        }
   
         if (!firstLoadComplete) setFirstLoadComplete(true);
       } catch (e: any) {
         if (e.name !== "AbortError") setError("Failed to load listings");
       } finally {
-        setLoading(false);
+        if (id === requestIdRef.current) setLoading(false);
       }
+      
     })();
     return () => controller.abort();
     // Re-fetch when filters (params) or paging (offset) change
@@ -840,38 +917,67 @@ async function tryPlayChime(): Promise<void> {
             e.currentTarget.style.transform = "none";
           }}
         >
-          {l.photos?.[0]?.url ? (
-            <img
-            src={l.photos[0].url}
-            alt={l.photos[0].alt ?? ""}
-            loading="lazy"
-            // Start slightly blurred & scaled, then remove on load
+          <div
+            // 16:9 box so the layout doesn’t jump (we’ll still keep your blur-up)
             style={{
+              position: "relative",
               width: "100%",
-              height: 180,
-              objectFit: "cover",
-              filter: "blur(16px)",
-              transform: "scale(1.02)",
-              transition: "filter 220ms ease, transform 220ms ease, opacity 220ms ease",
-              // Optional: faint shimmer to hint loading
-              background:
-                "linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.08), rgba(255,255,255,0.04))",
-              backgroundSize: "200% 100%",
-              animation: "shimmer 0.9s linear infinite",
+              aspectRatio: "16/9",
+              overflow: "hidden",
+              background: COLORS.panel,
             }}
-            onLoad={(e) => {
-              const el = e.currentTarget as HTMLImageElement;
-              // remove blur + scale once the real image is ready
-              el.style.filter = "none";
-              el.style.transform = "none";
-              el.style.animation = "none";
-              el.style.background = "none";
+            onMouseEnter={() => {
+              // schedule delayed open
+              const t = window.setTimeout(() => openPreview(l, 0), 500); // 900ms = just under 1s
+              // store timer so we can cancel if mouse leaves quickly
+              (window as any).__hoverTimer = t;
             }}
-          />
+            onMouseLeave={() => {
+              // cancel pending open if user bailed early
+              if ((window as any).__hoverTimer) {
+                clearTimeout((window as any).__hoverTimer);
+                (window as any).__hoverTimer = null;
+              }
+              // allow time to reach the overlay area without closing
+              scheduleClosePreview(180);
+            }}
 
-          ) : (
-            <div style={{ width: "100%", height: 180, background: COLORS.panel }} />
-          )}
+          >
+            {l.photos?.[0]?.url ? (
+              <img
+                src={l.photos[0].url}
+                alt={l.photos[0].alt ?? ""}
+                loading="lazy"
+                decoding="async"
+                fetchPriority="low"
+                // Start slightly blurred & scaled, then remove on load (your effect kept)
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  filter: "blur(16px)",
+                  transform: "scale(1.02)",
+                  transition: "filter 220ms ease, transform 220ms ease, opacity 220ms ease",
+                  background:
+                    "linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.08), rgba(255,255,255,0.04))",
+                  backgroundSize: "200% 100%",
+                  animation: "shimmer 0.9s linear infinite",
+                }}
+                onLoad={(e) => {
+                  const el = e.currentTarget as HTMLImageElement;
+                  el.style.filter = "none";
+                  el.style.transform = "none";
+                  el.style.animation = "none";
+                  el.style.background = "none";
+                }}
+              />
+            ) : (
+              <div style={{ position: "absolute", inset: 0, background: COLORS.panel }} />
+            )}
+          </div>
+
           <div style={{ padding: 12 }}>
             <div style={{ fontWeight: 800, color: COLORS.text }}>{l.title}</div>
             <div style={{ color: COLORS.sub }}>{l.city}, {l.country}</div>
@@ -888,6 +994,142 @@ async function tryPlayChime(): Promise<void> {
         </article>
       ))}
     </div>
+
+    {/* Hover Preview Overlay */}
+    {previewOpen && previewListing && (
+      <div
+        role="dialog"
+        aria-label={`Preview ${previewListing.title}`}
+        onMouseEnter={() => {
+          // cancel any scheduled close if user enters overlay
+          if (closePreviewTimer.current) {
+            window.clearTimeout(closePreviewTimer.current);
+            closePreviewTimer.current = null;
+          }
+          // also cancel any stray delayed-open timer
+          if ((window as any).__hoverTimer) {
+            clearTimeout((window as any).__hoverTimer);
+            (window as any).__hoverTimer = null;
+          }
+        }}
+        style={{
+          position: "fixed",                // ✅ FIX: take it out of layout flow
+          inset: 0,
+          zIndex: 1000,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.5)",    // subtle backdrop
+          padding: 20,
+          cursor: "zoom-out",
+          backdropFilter: "blur(1.5px)",
+          pointerEvents: "none"
+        }}
+      >
+        <div
+          onClick={(e) => e.stopPropagation()} // don’t close when clicking the image
+          onMouseLeave={closePreviewNow}
+          style={{
+            position: "relative",
+            maxWidth: "min(64vw, 960px)",     // ~25% smaller than before
+            width: "64vw",
+            aspectRatio: "16/9",
+            borderRadius: 16,
+            overflow: "hidden",
+            boxShadow: "0 20px 40px rgba(0,0,0,0.45)",
+            background: COLORS.card,
+            transform: "scale(1)",
+            opacity: 1,
+            transition: "transform 160ms ease, opacity 160ms ease",
+            pointerEvents: "auto"
+          }}
+        >
+          {previewListing.photos?.[previewIdx]?.url ? (
+            <img
+              src={previewListing.photos[previewIdx].url}
+              alt={previewListing.photos[previewIdx].alt ?? ""}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+              }}
+              loading="eager"
+              decoding="async"
+            />
+          ) : (
+            <div style={{ position: "absolute", inset: 0, background: COLORS.panel }} />
+          )}
+
+          {(previewListing.photos?.length ?? 0) > 1 && (
+            <>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const n = previewListing.photos!.length;
+                  setPreviewIdx((i) => (i - 1 + n) % n);
+                }}
+                aria-label="Previous photo"
+                style={{
+                  position: "absolute",
+                  left: 6,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  background: "rgba(0,0,0,0.5)",
+                  border: "1px solid rgba(255,255,255,0.25)",
+                  color: "white",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  cursor: "pointer",
+                }}
+              >
+                ◀
+              </button>
+
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const n = previewListing.photos!.length;
+                  setPreviewIdx((i) => (i + 1) % n);
+                }}
+                aria-label="Next photo"
+                style={{
+                  position: "absolute",
+                  right: 6,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  background: "rgba(0,0,0,0.5)",
+                  border: "1px solid rgba(255,255,255,0.25)",
+                  color: "white",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  cursor: "pointer",
+                }}
+              >
+                ▶
+              </button>
+
+              <div
+                style={{
+                  position: "absolute",
+                  right: 10,
+                  bottom: 10,
+                  background: "rgba(0,0,0,0.55)",
+                  color: "white",
+                  fontSize: 12,
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                }}
+              >
+                {(previewIdx + 1)} / {previewListing.photos!.length}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    )}
+
 
     {/* Load more */}
     {pageInfo?.hasMore && (
