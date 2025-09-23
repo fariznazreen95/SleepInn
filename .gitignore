@@ -1,13 +1,17 @@
 node_modules/
 dist/
 build/
-*.log
-.DS_Store
-server/.env
-web/.env
-.env
 
 # env
-.env
 **/.env
+.env
+server/.env
+web/.env
 
+# OS/editor
+.DS_Store
+Thumbs.db
+
+# zips & misc
+*.zip
+*.log
