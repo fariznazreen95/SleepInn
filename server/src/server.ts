@@ -7,6 +7,9 @@ import cookieParser from 'cookie-parser';
 import authRoutes from './routes/auth';
 import meRoute from './routes/me';
 import requireAuth from './middleware/requireAuth';
+import hostListings from './routes/hostListings';
+import photos from './routes/photos';
+
 
 const app = express();
 
@@ -17,6 +20,10 @@ app.use(cookieParser());
 // Auth mounts
 app.use('/api/auth', authRoutes);
 app.use('/api', meRoute);
+
+app.use('/api/host/listings', hostListings);
+app.use('/api/host/listings', photos); // /:id/photos/confirm
+app.use('/api/photos', photos);        // /photos/presign
 
 // Quick protected test route
 app.get('/api/protected', requireAuth(), (req, res) => {
@@ -105,8 +112,12 @@ app.get('/api/listings', async (req, res) => {
     SELECT COUNT(*)::int AS total
     FROM listings
     WHERE 1=1
-    ${whereFrag}
+    AND published = true
+    ${cityKey ? sql` AND REPLACE(city, ' ', '') ILIKE ${'%' + cityKey + '%'} ` : sql``}
+    AND (price_per_night)::numeric BETWEEN ${minRM} AND ${maxRM}
+    ${isInstant ? sql` AND is_instant_book = true ` : sql``}
   `);
+  
   const total: number = (totalRes as any).rows?.[0]?.total ?? 0;
 
   // 2) Page of listings (no photos yet)
@@ -115,11 +126,15 @@ app.get('/api/listings', async (req, res) => {
       id, title, description, price_per_night, city, country, beds, baths, is_instant_book
     FROM listings
     WHERE 1=1
-    ${whereFrag}
+    AND published = true
+    ${cityKey ? sql` AND REPLACE(city, ' ', '') ILIKE ${'%' + cityKey + '%'} ` : sql``}
+    AND (price_per_night)::numeric BETWEEN ${minRM} AND ${maxRM}
+    ${isInstant ? sql` AND is_instant_book = true ` : sql``}
     ORDER BY ${sql.raw(orderBy)}
     OFFSET ${off}
     LIMIT ${lim}
   `);
+  
   const listings = (listRes as any).rows as Array<{
     id: number;
     title: string;
