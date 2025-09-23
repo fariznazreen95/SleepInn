@@ -3,10 +3,25 @@ import cors from 'cors';
 import { ServerConfig } from './serverConfig';
 import { db } from './db';
 import { sql } from 'drizzle-orm';
+import cookieParser from 'cookie-parser';
+import authRoutes from './routes/auth';
+import meRoute from './routes/me';
+import requireAuth from './middleware/requireAuth';
 
 const app = express();
-app.use(cors());
+
+app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
 app.use(express.json());
+app.use(cookieParser());
+
+// Auth mounts
+app.use('/api/auth', authRoutes);
+app.use('/api', meRoute);
+
+// Quick protected test route
+app.get('/api/protected', requireAuth(), (req, res) => {
+  res.json({ ok: true, user: req.user });
+});
 
 // Health
 app.get('/health', async (_req, res) => {
@@ -26,7 +41,7 @@ app.get('/api/cities', async (_req, res) => {
       WHERE city IS NOT NULL AND city <> ''
       ORDER BY city ASC
     `);
-    res.json(rows.rows.map(r => r.city));
+    res.json(rows.rows.map((r: { city: string }) => r.city));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to fetch cities' });
@@ -41,24 +56,26 @@ app.get('/api/listings', async (req, res) => {
   const { city, min, max, instant, limit, offset, sort } =
     req.query as Record<string, string | undefined>;
 
-  // whitelist sort values → map to real SQL using your schema
-  // price → 'price_per_night'  |  newest → 'id'
+  // whitelist sort values → map to real SQL
   const SORT_MAP: Record<string, string> = {
-    price_asc:  'price_per_night ASC',
+    price_asc: 'price_per_night ASC',
     price_desc: 'price_per_night DESC',
-    newest:     'id DESC',
+    newest: 'id DESC',
   };
 
   // Pick the ORDER BY string or default (stable default)
   const orderBy = SORT_MAP[sort ?? ''] ?? 'id ASC';
-  
-  const DEFAULT_LIMIT = 24;
-  const MAX_LIMIT = 50;
+
+  // ---- Limits & ranges (single source of truth) ----
+  const ALLOWED_LIMITS = new Set([8, 12, 24, 48]);
+  const DEFAULT_LIMIT = 8;
   const MIN_PRICE = 0;
   const MAX_PRICE = 100_000;
 
   // limit
-  const lim = Math.min(Math.max(Number(limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
+  let limParsed = Number(limit);
+  if (!Number.isFinite(limParsed)) limParsed = DEFAULT_LIMIT;
+  const lim = ALLOWED_LIMITS.has(limParsed) ? limParsed : DEFAULT_LIMIT;
 
   // price range
   const minParsed = Number(min);
@@ -72,7 +89,7 @@ app.get('/api/listings', async (req, res) => {
   const off = Number.isFinite(offParsed) ? Math.max(Math.trunc(offParsed), 0) : 0;
 
   // flags / normalized inputs
-  const isInstant = (instant === 'true' || instant === '1');
+  const isInstant = instant === 'true' || instant === '1';
   const cityRaw = (city ?? '').trim();
   const cityKey = cityRaw.replace(/\s+/g, ''); // "George Town" → "GeorgeTown"
 
@@ -116,7 +133,7 @@ app.get('/api/listings', async (req, res) => {
   }>;
 
   // 3) Photos for this page only
-  const ids = listings.map(l => l.id);
+  const ids = listings.map((l) => l.id);
   const photosByListing: Record<number, Array<{ url: string; alt: string | null }>> = {};
 
   if (ids.length > 0) {
@@ -133,7 +150,7 @@ app.get('/api/listings', async (req, res) => {
   }
 
   // 4) Attach photos[] and return envelope
-  const data = listings.map(l => ({
+  const data = listings.map((l) => ({
     ...l,
     photos: photosByListing[l.id] ?? [],
   }));
@@ -148,8 +165,6 @@ app.get('/api/listings', async (req, res) => {
     },
   });
 });
-
-
 
 // ---- Listing details --------------------------------------------------------
 // GET /api/listings/:id
@@ -191,7 +206,6 @@ app.get('/api/listings/:id', async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch listing' });
   }
 });
-
 
 // Boot
 app.listen(ServerConfig.PORT, () => {

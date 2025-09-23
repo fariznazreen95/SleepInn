@@ -286,6 +286,18 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
+  // --- UI state used by the writer effect (must be declared before it's referenced) ---
+  const [error, setError] = useState<string | null>(null);
+  const [hint, setHint]   = useState<string | null>(null);
+  const [activeField, setActiveField] = useState<"min" | "max" | null>(null);
+
+  // auto-clear the hint after ~3s
+  useEffect(() => {
+    if (!hint) return;
+    const t = setTimeout(() => setHint(null), 3000);
+    return () => clearTimeout(t);
+  }, [hint]);
+
   // WRITE: when filters change, update the URL (debounced). Reset page=1 on filter change.
   useEffect(() => {
     const t = setTimeout(() => {
@@ -309,6 +321,18 @@ export default function App() {
         limit: sanitizedLimit,          // ✅ keep existing limit
         page:  prev.page || "1",
       };
+    
+      // 🔁 Guardrail: only swap when both present AND user isn't typing either field
+      if (target.min && target.max && !activeField) {
+        const nMin = Number(target.min);
+        const nMax = Number(target.max);
+        if (!Number.isNaN(nMin) && !Number.isNaN(nMax) && nMin > nMax) {
+          const tmp = target.min;
+          target.min = target.max;
+          target.max = tmp;
+          setHint("Min price was higher than Max — swapped for you.");
+        }
+      }       
   
       const filtersChanged =
         prev.city    !== target.city ||
@@ -340,7 +364,7 @@ export default function App() {
 
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [city, min, max, instant, searchParams, setSearchParams]);
+  }, [city, min, max, instant, activeField, searchParams, setSearchParams]);
 
   // data
   const [items, setItems] = useState<Listing[] | null>(null);
@@ -358,7 +382,10 @@ export default function App() {
   // to avoid flicker when moving pointer from card → overlay
   const closePreviewTimer = useRef<number | null>(null);
   const requestIdRef = useRef(0);
-
+  const lastFocusedCardRef = useRef<HTMLElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const mainRef = useRef<HTMLElement | null>(null);
+  
 
   // open preview for a listing at photo index
   function openPreview(listing: Listing, idx = 0) {
@@ -369,6 +396,26 @@ export default function App() {
     setPreviewListing(listing);
     setPreviewIdx(Math.max(0, Math.min(idx, (listing.photos?.length ?? 1) - 1)));
     setPreviewOpen(true);
+
+    // Cancel any pending hover-open timer from cards
+    if ((window as any).__hoverTimer) {
+      clearTimeout((window as any).__hoverTimer);
+      (window as any).__hoverTimer = null;
+    }
+
+  }
+
+  function handleCardKeyDown(
+    e: React.KeyboardEvent<HTMLElement>,
+    listing: Listing,
+    photoIndex = 0
+  ) {
+    // Activate on Enter or Space (prevent Space from scrolling)
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      lastFocusedCardRef.current = e.currentTarget;
+      openPreview(listing, photoIndex);
+    }
   }
 
   // schedule a gentle close (lets user move into the overlay)
@@ -388,8 +435,14 @@ export default function App() {
       clearTimeout((window as any).__hoverTimer);
       (window as any).__hoverTimer = null;
     }
-        setPreviewOpen(false);
+    setPreviewOpen(false);
     setPreviewListing(null);
+
+    // 🔙 return focus to the card that opened the preview
+    queueMicrotask(() => {
+      lastFocusedCardRef.current?.focus?.();
+    });
+
   }
 
   // keyboard: ←/→ cycle, Esc closes
@@ -414,8 +467,71 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [previewOpen, previewListing]);
 
+  // Focus trap + background inert while preview is open
+  useEffect(() => {
+    const mainEl = mainRef.current;
+    const dialogEl = overlayRef.current;
 
-  const [error, setError] = useState<string | null>(null);
+    if (!previewOpen || !dialogEl) {
+      // cleanup if previously active
+      document.body.style.overflow = "";
+      if (mainEl) {
+        mainEl.removeAttribute("inert");
+        mainEl.removeAttribute("aria-hidden");
+      }
+      return;
+    }
+
+    // Prevent background scroll and make main inert to clicks/tab
+    document.body.style.overflow = "hidden";
+    if (mainEl) {
+      mainEl.setAttribute("inert", "");
+      mainEl.setAttribute("aria-hidden", "true");
+    }
+
+    // Move focus into the dialog container
+    dialogEl.focus({ preventScroll: true });
+
+    // Trap Tab within the dialog
+    function onKeydown(e: KeyboardEvent) {
+      if (e.key !== "Tab") return;
+      const root = overlayRef.current;
+      if (!root) return;
+
+      const focusables = Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => !el.hasAttribute("disabled") && el.tabIndex !== -1);
+
+      const first = focusables[0] ?? root;
+      const last = focusables[focusables.length - 1] ?? root;
+
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey) {
+        if (!active || active === first || !root.contains(active)) {
+          e.preventDefault();
+          (last as HTMLElement).focus();
+        }
+      } else {
+        if (active === last) {
+          e.preventDefault();
+          (first as HTMLElement).focus();
+        }
+      }
+    }
+
+    window.addEventListener("keydown", onKeydown);
+    return () => {
+      window.removeEventListener("keydown", onKeydown);
+      document.body.style.overflow = "";
+      if (mainEl) {
+        mainEl.removeAttribute("inert");
+        mainEl.removeAttribute("aria-hidden");
+      }
+    };
+  }, [previewOpen]);
+  
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState<{
     total: number; offset: number; limit: number; hasMore: boolean
@@ -694,6 +810,7 @@ async function tryPlayChime(): Promise<void> {
 
       {/* outer wrapper centers content block */}
       <main
+        ref={mainRef}
         style={{
           width: "min(1200px, 96vw)",
           margin: "0 auto",
@@ -746,6 +863,8 @@ async function tryPlayChime(): Promise<void> {
             <input
               type="number"
               value={min}
+              onFocus={() => setActiveField("min")}
+              onBlur={() => setActiveField(null)}
               onChange={(e) => setMin(e.target.value)}
               style={{
                 border: `1px solid ${COLORS.border}`,
@@ -763,6 +882,8 @@ async function tryPlayChime(): Promise<void> {
             <input
               type="number"
               value={max}
+              onFocus={() => setActiveField("max")}
+              onBlur={() => setActiveField(null)}
               onChange={(e) => setMax(e.target.value)}
               style={{
                 border: `1px solid ${COLORS.border}`,
@@ -873,11 +994,20 @@ async function tryPlayChime(): Promise<void> {
           </button>
         </div>
 
+        {hint && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{ marginTop: 8, color: COLORS.sub, fontSize: 12 }}
+          >
+            {hint}
+          </div>
+        )}
+
         {/* States */}
         {loading && <div style={{ marginTop: 16 }}>Loading…</div>}
         {error && <div style={{ marginTop: 16, color: "salmon" }}>{error}</div>}
-        {items && items.length === 0 && <div style={{ marginTop: 16 }}>No listings match your filters.</div>}
-
+      
         {/* Grid */}
 {items && items.length > 0 && (
   <>
@@ -892,13 +1022,21 @@ async function tryPlayChime(): Promise<void> {
       {items.map((l) => (
         <article
           key={l.id}
-         
-          onClick={() => {
+          role="button"
+          tabIndex={0}
+          aria-label={`Open ${l.title ?? "listing"} details`}
+          onClick={(event) => {
             // remember current grid scroll so we can restore after closing details
             const key = `gridScroll:${searchParams.toString()}`;
             sessionStorage.setItem(key, String(window.scrollY));
+
+            // remember which card triggered open (so we can restore focus later)
+            lastFocusedCardRef.current = event.currentTarget as HTMLElement;
+
             navigate({ pathname: `/listing/${l.id}`, search: searchParams.toString() });
           }}
+          onKeyDown={(e) => handleCardKeyDown(e, l, 0)}
+
           
           style={{
             cursor: "pointer",
@@ -939,8 +1077,9 @@ async function tryPlayChime(): Promise<void> {
                 (window as any).__hoverTimer = null;
               }
               // allow time to reach the overlay area without closing
-              scheduleClosePreview(180);
+              scheduleClosePreview(180);    // <-- was 180
             }}
+            
 
           >
             {l.photos?.[0]?.url ? (
@@ -950,6 +1089,8 @@ async function tryPlayChime(): Promise<void> {
                 loading="lazy"
                 decoding="async"
                 fetchPriority="low"
+                width={1600}
+                height={900}
                 // Start slightly blurred & scaled, then remove on load (your effect kept)
                 style={{
                   position: "absolute",
@@ -995,11 +1136,16 @@ async function tryPlayChime(): Promise<void> {
       ))}
     </div>
 
+
     {/* Hover Preview Overlay */}
     {previewOpen && previewListing && (
       <div
+        ref={overlayRef}
         role="dialog"
+        aria-modal="true"
         aria-label={`Preview ${previewListing.title}`}
+        tabIndex={-1}
+        
         onMouseEnter={() => {
           // cancel any scheduled close if user enters overlay
           if (closePreviewTimer.current) {
@@ -1012,26 +1158,38 @@ async function tryPlayChime(): Promise<void> {
             (window as any).__hoverTimer = null;
           }
         }}
+        
         style={{
-          position: "fixed",                // ✅ FIX: take it out of layout flow
+          position: "fixed",
           inset: 0,
           zIndex: 1000,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          background: "rgba(0,0,0,0.5)",    // subtle backdrop
+          background: "rgba(0,0,0,0.5)",
           padding: 20,
           cursor: "zoom-out",
           backdropFilter: "blur(1.5px)",
-          pointerEvents: "none"
+          pointerEvents: "none"                
         }}
       >
+
         <div
           onClick={(e) => e.stopPropagation()} // don’t close when clicking the image
-          onMouseLeave={closePreviewNow}
+          onMouseEnter={() => {
+            if (closePreviewTimer.current) {
+               window.clearTimeout(closePreviewTimer.current);
+               closePreviewTimer.current = null;
+             }
+             if ((window as any).__hoverTimer) {
+               clearTimeout((window as any).__hoverTimer);
+               (window as any).__hoverTimer = null;
+              }
+            }}
+          onMouseLeave={() => scheduleClosePreview(180)}
           style={{
             position: "relative",
-            maxWidth: "min(64vw, 960px)",     // ~25% smaller than before
+            maxWidth: "min(64vw, 960px)",
             width: "64vw",
             aspectRatio: "16/9",
             borderRadius: 16,
@@ -1044,6 +1202,7 @@ async function tryPlayChime(): Promise<void> {
             pointerEvents: "auto"
           }}
         >
+
           {previewListing.photos?.[previewIdx]?.url ? (
             <img
               src={previewListing.photos[previewIdx].url}
@@ -1159,6 +1318,44 @@ async function tryPlayChime(): Promise<void> {
     )}
   </>
 )}
+
+{/* Empty state */}
+{items && items.length === 0 && (
+  <div
+    style={{
+      marginTop: 24,
+      padding: 24,
+      border: `1px dashed ${COLORS.border}`,
+      borderRadius: 12,
+      color: COLORS.sub,
+      textAlign: "center",
+    }}
+  >
+    <div style={{ fontWeight: 800, color: COLORS.text, marginBottom: 6 }}>
+      No results found
+    </div>
+    <div style={{ marginBottom: 12 }}>
+      Try adjusting your filters or resetting to defaults.
+    </div>
+    <button
+      onClick={resetFilters}
+      style={{
+        padding: "10px 14px",
+        borderRadius: 10,
+        border: `1px solid ${COLORS.gold}`,
+        color: COLORS.bg,
+        background: COLORS.gold,
+        fontWeight: 700,
+        cursor: "pointer",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = COLORS.goldDark)}
+      onMouseLeave={(e) => (e.currentTarget.style.background = COLORS.gold)}
+    >
+      Reset filters
+    </button>
+  </div>
+)}
+
 
       </main>
     </div>
