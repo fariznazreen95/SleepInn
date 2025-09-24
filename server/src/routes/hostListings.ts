@@ -9,6 +9,7 @@ const router = Router();
 const upsertSchema = z.object({
   title: z.string().min(3),
   city: z.string().min(2),
+  country: z.string().min(2).default("Malaysia"),
   pricePerNight: z.number().int().positive(),
   beds: z.number().int().positive(),
   baths: z.number().int().min(0),
