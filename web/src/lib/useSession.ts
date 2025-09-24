@@ -7,10 +7,14 @@ export function useSession() {
 
   useEffect(() => {
     fetch(`${API}/api/me`, { credentials: "include" })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => setUser(d?.user || null))
-      .finally(() => setLoading(false));
-  }, []);
+    .then(r => (r.ok ? r.json() : null))
+    .then(d => {
+      if (!d) return setUser(null);
+      setUser((d as any).user ?? d);   // accepts flat or { user }
+    })
+    .catch(() => setUser(null))
+    .finally(() => setLoading(false));
+    }, []);
 
   return { user, loading };
 }

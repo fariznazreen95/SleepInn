@@ -13,11 +13,31 @@ export default function PhotoUploader({ listingId }: { listingId: string }) {
 
     setBusy(true);
     try {
-      const presign = await api("/api/photos/presign", {
+      // Ask server for presign (or fallback)
+      const presign: any = await api("/api/photos/presign", {
         method: "POST",
-        body: JSON.stringify({ listingId: Number(listingId), contentType: file.type })
+        body: JSON.stringify({
+          listingId: Number(listingId),
+          contentType: file.type,
+        }),
       });
 
+      // ⛑️ Fallback: storage not configured → skip upload and just confirm placeholder
+      if (presign && presign.__fallback) {
+        await api(`/api/host/listings/${listingId}/photos/confirm`, {
+          method: "POST",
+          body: JSON.stringify({
+            url: presign.publicUrl,
+            key: presign.key,
+            order: photos.length,
+          }),
+        });
+        setPhotos((p) => [...p, { url: presign.publicUrl }]);
+        setNote("Attached placeholder photo (no storage configured).");
+        return;
+      }
+
+      // Real S3 upload path
       const fd = new FormData();
       Object.entries(presign.fields).forEach(([k, v]: any) => fd.append(k, String(v)));
       fd.append("Content-Type", file.type);
@@ -28,14 +48,20 @@ export default function PhotoUploader({ listingId }: { listingId: string }) {
 
       await api(`/api/host/listings/${listingId}/photos/confirm`, {
         method: "POST",
-        body: JSON.stringify({ url: presign.publicUrl, key: presign.key, order: photos.length })
+        body: JSON.stringify({
+          url: presign.publicUrl,
+          key: presign.key,
+          order: photos.length,
+        }),
       });
 
-      setPhotos([...photos, { url: presign.publicUrl }]);
+      setPhotos((p) => [...p, { url: presign.publicUrl }]);
       setNote("");
-    } catch (e:any) {
-      setNote(e.message || "Upload error — storage not configured yet?");
-    } finally { setBusy(false); }
+    } catch (e: any) {
+      setNote(e?.message || "Upload error — storage not configured yet?");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -43,7 +69,13 @@ export default function PhotoUploader({ listingId }: { listingId: string }) {
       <input type="file" accept="image/*" onChange={onChoose} disabled={busy} />
       {note && <div style={{ color: "orange", marginTop: 8 }}>{note}</div>}
       <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-        {photos.map((p, i) => <img key={i} src={p.url} style={{ width: 160, height: 120, objectFit: "cover", borderRadius: 8 }} />)}
+        {photos.map((p, i) => (
+          <img
+            key={i}
+            src={p.url}
+            style={{ width: 160, height: 120, objectFit: "cover", borderRadius: 8 }}
+          />
+        ))}
       </div>
     </div>
   );
