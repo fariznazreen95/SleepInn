@@ -246,6 +246,16 @@ export default function App() {
   const [min, setMin] = useState<string>("");
   const [max, setMax] = useState<string>("");
   const [instant, setInstant] = useState(false);
+  // NEW: date range + guests (URL-synced)
+  const [start, setStart]   = useState("");
+  const [end, setEnd]       = useState("");
+  const [guests, setGuests] = useState<string>("");
+  
+  // ANCHOR: HYDRATION-FLAG
+  // Only let the writer run after we've read the URL once.
+  const [hydrated, setHydrated] = useState(false);
+  
+
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
  
@@ -273,14 +283,23 @@ export default function App() {
     const qMin  = searchParams.get("min")  ?? "";
     const qMax  = searchParams.get("max")  ?? "";
     const qInst = searchParams.get("instant"); // "true"/"1" => true
-
+    const qStart  = searchParams.get("start")  ?? "";
+    const qEnd    = searchParams.get("end")    ?? "";
+    const qGuests = searchParams.get("guests") ?? "";
+    
     const nextInstant = qInst === "true" || qInst === "1";
 
     // only update when different (prevents unnecessary re-renders)
     if (qCity !== city) setCity(qCity);
+    if (qStart  !== start)  setStart(qStart);
+    if (qEnd    !== end)    setEnd(qEnd);
+    if (qGuests !== guests) setGuests(qGuests);
     if (qMin  !== min)  setMin(qMin);
     if (qMax  !== max)  setMax(qMax);
     if (nextInstant !== instant) setInstant(nextInstant);
+
+    // ANCHOR: SET-HYDRATED
+    if (!hydrated) setHydrated(true);
 
     // we intentionally depend only on searchParams to avoid loops
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -300,29 +319,41 @@ export default function App() {
 
   // WRITE: when filters change, update the URL (debounced). Reset page=1 on filter change.
   useEffect(() => {
+    // 3a) GATE THE WRITER UNTIL WE’VE READ THE URL ONCE
+    if (!hydrated) return;
+
     const t = setTimeout(() => {
-      const prevLimit = searchParams.get("limit");
+      // 3b) SNAPSHOT THE CURRENT URL (don’t read useSearchParams inside writer)
+      const current = new URLSearchParams(window.location.search);
+
+      const prevLimit = current.get("limit");
       const sanitizedLimit = String(Math.min(50, Math.max(1, Number(prevLimit ?? "8"))));
-  
+
       const prev = {
-        city:    searchParams.get("city") ?? "",
-        min:     searchParams.get("min")  ?? "",
-        max:     searchParams.get("max")  ?? "",
-        instant: searchParams.get("instant") ?? "",
+        city:    current.get("city") ?? "",
+        min:     current.get("min")  ?? "",
+        max:     current.get("max")  ?? "",
+        instant: current.get("instant") ?? "",
+        start:   current.get("start")  ?? "",
+        end:     current.get("end")    ?? "",
+        guests:  current.get("guests") ?? "",
         limit:   sanitizedLimit,
-        page:    searchParams.get("page") ?? "",
+        page:    current.get("page") ?? "",
       };
-  
+
       const target = {
-        city: city.trim(),
-        min:  min.trim() ? String(Number(min)) : "",
-        max:  max.trim() ? String(Number(max)) : "",
+        city:    city.trim(),
+        min:     min.trim() ? String(Number(min)) : "",
+        max:     max.trim() ? String(Number(max)) : "",
         instant: instant ? "true" : "",
-        limit: sanitizedLimit,          // ✅ keep existing limit
-        page:  prev.page || "1",
+        start:   start.trim(),
+        end:     end.trim(),
+        guests:  guests.trim() ? String(Math.max(1, Number(guests))) : "",
+        limit:   sanitizedLimit,
+        page:    prev.page || "1",
       };
-    
-      // 🔁 Guardrail: only swap when both present AND user isn't typing either field
+
+      // swap min/max only when both present and not actively typing
       if (target.min && target.max && !activeField) {
         const nMin = Number(target.min);
         const nMax = Number(target.max);
@@ -332,39 +363,50 @@ export default function App() {
           target.max = tmp;
           setHint("Min price was higher than Max — swapped for you.");
         }
-      }       
-  
-      const filtersChanged =
-        prev.city    !== target.city ||
-        prev.min     !== target.min  ||
-        prev.max     !== target.max  ||
-        prev.instant !== target.instant;
-  
-      if (filtersChanged) target.page = "1";
-  
-      const next = new URLSearchParams();
-      if (target.city)    next.set("city", target.city);
-      if (target.min)     next.set("min", target.min);
-      if (target.max)     next.set("max", target.max);
-      if (target.instant) next.set("instant", target.instant);
-      if (target.limit)   next.set("limit", target.limit);
-      if (target.page)    next.set("page", target.page);
+      }
 
-      // keep current sort in the URL (so our writer doesn’t wipe it out)
-      const currSort = searchParams.get("sort");
-      if (currSort) next.set("sort", currSort);
-  
-      const currStr = searchParams.toString();
+      const filtersChanged =
+        prev.city    !== target.city    ||
+        prev.min     !== target.min     ||
+        prev.max     !== target.max     ||
+        prev.instant !== target.instant ||
+        prev.start   !== target.start   ||
+        prev.end     !== target.end     ||
+        prev.guests  !== target.guests;
+
+      if (filtersChanged) target.page = "1";
+
+      // start from the current URL; patch only our keys
+      const next = new URLSearchParams(current);
+      const currSort = current.get("sort") || "";
+
+      const patch: Record<string, string> = {
+        city:    target.city,
+        min:     target.min,
+        max:     target.max,
+        instant: target.instant,
+        start:   target.start,
+        end:     target.end,
+        guests:  target.guests,
+        limit:   target.limit,
+        page:    target.page,
+        sort:    currSort, // preserve sort
+      };
+
+      for (const [k, v] of Object.entries(patch)) {
+        if (!v) next.delete(k);
+        else next.set(k, v);
+      }
+
+      const currStr = current.toString();
       const nextStr = next.toString();
       if (currStr !== nextStr) setSearchParams(next, { replace: true });
     }, 300);
 
     return () => clearTimeout(t);
-    // IMPORTANT: keep deps like this—URL is the source of truth here   // eslint-disable-next-line react-hooks/exhaustive-deps
 
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [city, min, max, instant, activeField, searchParams, setSearchParams]);
+    // 3c) DEPENDENCIES: no searchParams here (prevents ping-pong)
+  }, [hydrated, city, min, max, instant, start, end, guests, activeField, limit]);
 
   // data
   const [items, setItems] = useState<Listing[] | null>(null);
@@ -668,14 +710,18 @@ async function tryPlayChime(): Promise<void> {
         setError(null);
         setLoading(true);
   
-        // Build API params: reuse filters + add offset
-        const apiParams = new URLSearchParams(params);
+        // ANCHOR: FETCH-LISTINGS
+        // Use the FULL current URL query so start/end/guests flow through
+        const apiParams = new URLSearchParams(searchParams);
         apiParams.set("limit", String(limit));
         apiParams.set("offset", String(offset));
-        const sort = searchParams.get("sort") ?? "";
-        if (sort) apiParams.set("sort", sort);
-        
-        const res = await fetch(`${API}/api/listings?${apiParams.toString()}`, { signal: controller.signal });
+        // (sort already in searchParams; keep it as-is)
+
+        const hasRange = apiParams.has("start") && apiParams.has("end") && apiParams.has("guests");
+        const endpoint = hasRange ? "/api/listings/search" : "/api/listings";
+        const res = await fetch(`${API}${endpoint}?${apiParams.toString()}`, { signal: controller.signal });
+
+        // ANCHOR: FETCH-LISTINGS-END
         if (!res.ok) throw new Error("Bad response");
   
         const payload = await res.json() as {
@@ -738,6 +784,7 @@ async function tryPlayChime(): Promise<void> {
   
     // local inputs (will sync from URL too)
     setCity(""); setMin(""); setMax(""); setInstant(false);
+    setStart(""); setEnd(""); setGuests("");
   
     // UX: scroll to top of grid
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -901,6 +948,56 @@ async function tryPlayChime(): Promise<void> {
             Instant book
           </label>
 
+        {/* Dates + Guests */}
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <label style={{ fontSize: 12, color: COLORS.sub }}>Start</label>
+            <input
+              type="date"
+              value={start}
+              onChange={(e) => setStart(e.target.value)}
+              style={{
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 10,
+                padding: "10px 12px",
+                background: COLORS.bg,
+                color: COLORS.text,
+              }}
+            />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <label style={{ fontSize: 12, color: COLORS.sub }}>End</label>
+            <input
+              type="date"
+              value={end}
+              onChange={(e) => setEnd(e.target.value)}
+              style={{
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 10,
+                padding: "10px 12px",
+                background: COLORS.bg,
+                color: COLORS.text,
+              }}
+            />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <label style={{ fontSize: 12, color: COLORS.sub }}>Guests</label>
+            <input
+              type="number"
+              min={1}
+              value={guests}
+              onChange={(e) => setGuests(e.target.value)}
+              style={{
+                width: 90,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 10,
+                padding: "10px 12px",
+                background: COLORS.bg,
+                color: COLORS.text,
+              }}
+            />
+          </div>
+        </div>
 
           {/* SORT (URL-synced) */}
           <label style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: 6, color: COLORS.text }}>

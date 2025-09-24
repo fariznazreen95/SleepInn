@@ -4,8 +4,12 @@ export const users = pgTable('users', {
   id: serial('id').primaryKey(),
   email: text('email').notNull().unique(),
   name: text('name'),
+  // NEW: align TS schema with DB so /auth/login can read the hash
+  password_hash: text('password_hash'),
+  role: text('role').notNull().default('user'),
   createdAt: timestamp('created_at').defaultNow().notNull()
 });
+
 
 export const listings = pgTable('listings', {
   id: serial('id').primaryKey(),

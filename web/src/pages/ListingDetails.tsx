@@ -28,6 +28,39 @@ const COLORS = {
 
 export default function ListingDetails() {
   const { id } = useParams();
+  // ANCHOR: QUOTE_STATE
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [start, setStart]   = useState(searchParams.get("start")  ?? "");
+  const [end, setEnd]       = useState(searchParams.get("end")    ?? "");
+  const [guests, setGuests] = useState(searchParams.get("guests") ?? "");
+
+  const [quote, setQuote]         = useState<null | {
+    listingId: number; currency: string; nights: number;
+    nightlyBase: number; subtotal: number; total: number;
+    fees: { service: number };
+    meta: { city: string; country: string; start: string; end: string; guests: number };
+  }>(null);
+
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+
+  // Merge helper so URL keeps start/end/guests without nuking other params
+  const mergeParams = (patch: Record<string, string>) => {
+    const next = new URLSearchParams(searchParams);
+    for (const [k, v] of Object.entries(patch)) {
+      if (v) next.set(k, v); else next.delete(k);
+    }
+    setSearchParams(next, { replace: true });
+  };
+  // ANCHOR: QUOTE_STATE_END
+  // Keep inputs in sync if URL search params change (back/forward, etc.)
+  useEffect(() => {
+    setStart(searchParams.get("start")  ?? "");
+    setEnd(searchParams.get("end")      ?? "");
+    setGuests(searchParams.get("guests")?? "");
+  }, [searchParams]);
+
+
   const [search] = useSearchParams();
   const navigate = useNavigate();
 
@@ -111,6 +144,61 @@ export default function ListingDetails() {
     return () => window.removeEventListener("keydown", onKey);
   }, [navigate, search, hoverSrc]);
 
+  // ANCHOR: QUOTE_HANDLER
+  async function handleCheckPrice() {
+    try {
+      setQuote(null);
+      setQuoteError(null);
+      setQuoteLoading(true);
+
+      const listingId = Number(id);
+      if (!listingId || !start || !end || !guests) {
+        setQuoteError("Please set start, end and guests.");
+        return;
+      }
+
+      const res = await fetch(`${API}/api/pricing/quote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          listingId,
+          start,
+          end,
+          guests: Math.max(1, Number(guests)),
+        }),
+      });
+
+      if (res.status === 409) {
+        const j = await res.json();
+        setQuote(null);
+        setQuoteError(
+          j?.missingDays?.length
+            ? `Unavailable for all nights. Missing: ${j.missingDays.join(", ")}`
+            : "Unavailable for the selected dates."
+        );
+        return;
+      }
+
+      if (!res.ok) {
+        setQuote(null);
+        setQuoteError("Failed to compute quote.");
+        return;
+      }
+
+      const j = await res.json();
+      setQuote(j);
+      setQuoteError(null);
+    } catch {
+      setQuote(null);
+      setQuoteError("Failed to compute quote.");
+    } finally {
+      setQuoteLoading(false);
+    }
+  }
+  // ANCHOR: QUOTE_HANDLER_END
+
+
   return (
     <div
       style={{
@@ -175,6 +263,115 @@ export default function ListingDetails() {
               <span style={{ color: COLORS.sub }}>• {item.baths} baths</span>
               {item.is_instant_book && <span style={{ color: COLORS.gold }}>• Instant book</span>}
             </div>
+
+            {/* ANCHOR: QUOTE_PANEL */}
+            <div
+              style={{
+                marginTop: 12,
+                display: "flex",
+                gap: 12,
+                flexWrap: "wrap",
+                alignItems: "flex-end",
+                background: COLORS.panel,
+                border: `1px solid ${COLORS.border}`,
+                padding: 12,
+                borderRadius: 10,
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <label style={{ fontSize: 12, color: COLORS.sub }}>Start</label>
+                <input
+                  type="date"
+                  value={start}
+                  onChange={(e) => { setStart(e.target.value); mergeParams({ start: e.target.value }); }}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: `1px solid ${COLORS.border}`,
+                    background: "#0b1220",
+                    color: COLORS.text,
+                  }}
+                />
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <label style={{ fontSize: 12, color: COLORS.sub }}>End</label>
+                <input
+                  type="date"
+                  value={end}
+                  onChange={(e) => { setEnd(e.target.value); mergeParams({ end: e.target.value }); }}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: `1px solid ${COLORS.border}`,
+                    background: "#0b1220",
+                    color: COLORS.text,
+                  }}
+                />
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <label style={{ fontSize: 12, color: COLORS.sub }}>Guests</label>
+                <input
+                  type="number" min={1}
+                  value={guests}
+                  onChange={(e) => { setGuests(e.target.value); mergeParams({ guests: e.target.value }); }}
+                  style={{
+                    width: 110,
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: `1px solid ${COLORS.border}`,
+                    background: "#0b1220",
+                    color: COLORS.text,
+                  }}
+                />
+              </div>
+
+              <button
+                onClick={handleCheckPrice}
+                disabled={!start || !end || !guests || quoteLoading}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  border: `1px solid ${COLORS.gold}`,
+                  color: "#0b1220",
+                  background: COLORS.gold,
+                  fontWeight: 800,
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = COLORS.goldDark)}
+                onMouseLeave={(e) => (e.currentTarget.style.background = COLORS.gold)}
+              >
+                {quoteLoading ? "Checking..." : "Check price"}
+              </button>
+            </div>
+
+            {quoteError && (
+              <div style={{ marginTop: 10, color: "salmon" }}>{quoteError}</div>
+            )}
+
+            {quote && (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: 12,
+                  borderRadius: 10,
+                  border: `1px solid ${COLORS.border}`,
+                  background: "#10263d",
+                  color: COLORS.text,
+                }}
+              >
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>Price breakdown</div>
+                <div>Nights: {quote.nights}</div>
+                <div>Nightly: {quote.currency} {quote.nightlyBase}</div>
+                <div>Subtotal: {quote.currency} {quote.subtotal}</div>
+                <div>Service fee: {quote.currency} {quote.fees.service}</div>
+                <div style={{ fontWeight: 900, marginTop: 6 }}>
+                  Total: {quote.currency} {quote.total}
+                </div>
+              </div>
+            )}
+            {/* ANCHOR: QUOTE_PANEL_END */}
+
 
             {/* Gallery */}
             <div
@@ -259,3 +456,4 @@ export default function ListingDetails() {
     </div>
   );
 }
+

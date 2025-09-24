@@ -9,7 +9,9 @@ import meRoute from './routes/me';
 import requireAuth from './middleware/requireAuth';
 import hostListings from './routes/hostListings';
 import photos from './routes/photos';
-
+import changePassword from "./routes/changePassword";
+import availability from "./routes/availability";
+import pricing from "./routes/pricing";
 
 const app = express();
 
@@ -17,9 +19,15 @@ app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
+app.use("/api", availability);
+
 // Auth mounts
 app.use('/api/auth', authRoutes);
 app.use('/api', meRoute);
+
+app.use("/api", pricing);
+
+app.use("/api/change-password", changePassword);
 
 app.use('/api/host/listings', hostListings);
 app.use('/api/host/listings', photos); // /:id/photos/confirm
@@ -56,129 +64,355 @@ app.get('/api/cities', async (_req, res) => {
 });
 
 // ---- Listings with filters ---------------------------------------------------
-// GET /api/listings?city=&min=&max=&instant=true&limit=24&offset=0
-// - price_per_night is TEXT in DB → CAST to NUMERIC for numeric filters
-// - city filter is "space-insensitive": 'georgetown' matches 'George Town'
+// GET /api/listings?city=&min=&max=&instant=true&limit=24&offset=0&start=YYYY-MM-DD&end=YYYY-MM-DD&guests=2
 app.get('/api/listings', async (req, res) => {
-  const { city, min, max, instant, limit, offset, sort } =
+  const { city, min, max, instant, limit, offset, sort, start, end, guests } =
     req.query as Record<string, string | undefined>;
 
-  // whitelist sort values → map to real SQL
   const SORT_MAP: Record<string, string> = {
-    price_asc: 'price_per_night ASC',
-    price_desc: 'price_per_night DESC',
-    newest: 'id DESC',
+    price_asc: 'l.price_per_night ASC',
+    price_desc: 'l.price_per_night DESC',
+    newest: 'l.id DESC',
   };
+  const orderBy = SORT_MAP[sort ?? ''] ?? 'l.id ASC';
 
-  // Pick the ORDER BY string or default (stable default)
-  const orderBy = SORT_MAP[sort ?? ''] ?? 'id ASC';
-
-  // ---- Limits & ranges (single source of truth) ----
   const ALLOWED_LIMITS = new Set([8, 12, 24, 48]);
   const DEFAULT_LIMIT = 8;
   const MIN_PRICE = 0;
   const MAX_PRICE = 100_000;
 
-  // limit
   let limParsed = Number(limit);
   if (!Number.isFinite(limParsed)) limParsed = DEFAULT_LIMIT;
   const lim = ALLOWED_LIMITS.has(limParsed) ? limParsed : DEFAULT_LIMIT;
 
-  // price range
   const minParsed = Number(min);
   const maxParsed = Number(max);
   let minRM = Number.isFinite(minParsed) ? Math.max(minParsed, MIN_PRICE) : MIN_PRICE;
   let maxRM = Number.isFinite(maxParsed) ? Math.min(maxParsed, MAX_PRICE) : MAX_PRICE;
   if (minRM > maxRM) [minRM, maxRM] = [maxRM, minRM];
 
-  // paging
   const offParsed = Number(offset);
   const off = Number.isFinite(offParsed) ? Math.max(Math.trunc(offParsed), 0) : 0;
 
-  // flags / normalized inputs
   const isInstant = instant === 'true' || instant === '1';
   const cityRaw = (city ?? '').trim();
-  const cityKey = cityRaw.replace(/\s+/g, ''); // "George Town" → "GeorgeTown"
+  const cityKey = cityRaw.replace(/\s+/g, '');
 
-  // WHERE fragment (space-insensitive city, price range, instant)
-  const whereFrag = sql`
-    ${cityKey ? sql` AND REPLACE(city, ' ', '') ILIKE ${'%' + cityKey + '%'} ` : sql``}
-    AND (price_per_night)::numeric BETWEEN ${minRM} AND ${maxRM}
-    ${isInstant ? sql` AND is_instant_book = true ` : sql``}
+  const isYmd = (s?: string) => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
+  const startStr = start?.trim();
+  const endStr = end?.trim();
+  const useDate = isYmd(startStr) && isYmd(endStr);
+
+  const guestsNum = Number(guests);
+  const needGuests = Number.isFinite(guestsNum) ? Math.max(1, Math.trunc(guestsNum)) : undefined;
+
+  // base WHERE for listings
+  const baseWhere = sql`
+    l.published = true
+    ${cityKey ? sql` AND REPLACE(l.city, ' ', '') ILIKE ${'%' + cityKey + '%'} ` : sql``}
+    AND (l.price_per_night)::numeric BETWEEN ${minRM} AND ${maxRM}
+    ${isInstant ? sql` AND l.is_instant_book = true ` : sql``}
   `;
 
-  // 1) COUNT(*) with same filters (no photos join)
-  const totalRes = await db.execute(sql`
-    SELECT COUNT(*)::int AS total
-    FROM listings
-    WHERE 1=1
-    AND published = true
-    ${cityKey ? sql` AND REPLACE(city, ' ', '') ILIKE ${'%' + cityKey + '%'} ` : sql``}
-    AND (price_per_night)::numeric BETWEEN ${minRM} AND ${maxRM}
-    ${isInstant ? sql` AND is_instant_book = true ` : sql``}
-  `);
-  
-  const total: number = (totalRes as any).rows?.[0]?.total ?? 0;
+  try {
+    // -------- With date range: compute eligible_ids once, then count + page --------
+    if (useDate) {
+      if ((startStr as string) > (endStr as string)) {
+        return res.status(400).json({ error: 'start must be <= end' });
+      }
+      const capCheck = needGuests ? sql` OR a.guests < ${needGuests} ` : sql``;
 
-  // 2) Page of listings (no photos yet)
-  const listRes = await db.execute(sql`
-    SELECT
-      id, title, description, price_per_night, city, country, beds, baths, is_instant_book
-    FROM listings
-    WHERE 1=1
-    AND published = true
-    ${cityKey ? sql` AND REPLACE(city, ' ', '') ILIKE ${'%' + cityKey + '%'} ` : sql``}
-    AND (price_per_night)::numeric BETWEEN ${minRM} AND ${maxRM}
-    ${isInstant ? sql` AND is_instant_book = true ` : sql``}
-    ORDER BY ${sql.raw(orderBy)}
-    OFFSET ${off}
-    LIMIT ${lim}
-  `);
-  
-  const listings = (listRes as any).rows as Array<{
-    id: number;
-    title: string;
-    description: string | null;
-    price_per_night: string;
-    city: string;
-    country: string;
-    beds: number;
-    baths: number;
-    is_instant_book: boolean;
-  }>;
+      const totalRes = await db.execute(sql`
+        WITH days AS (
+          SELECT generate_series(${startStr}::date, ${endStr}::date, '1 day')::date AS "day"
+        ),
+        eligible_ids AS (
+          SELECT l.id
+          FROM listings l
+          WHERE ${baseWhere}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM days d
+              LEFT JOIN availability a
+                ON a.listing_id = l.id
+               AND a."day" = d."day"
+              WHERE a."day" IS NULL
+                 OR a.is_available = FALSE
+                 ${capCheck}
+            )
+        )
+        SELECT COUNT(*)::int AS total FROM eligible_ids
+      `);
+      const total: number = (totalRes as any).rows?.[0]?.total ?? 0;
 
-  // 3) Photos for this page only
-  const ids = listings.map((l) => l.id);
-  const photosByListing: Record<number, Array<{ url: string; alt: string | null }>> = {};
+      const listRes = await db.execute(sql`
+        WITH days AS (
+          SELECT generate_series(${startStr}::date, ${endStr}::date, '1 day')::date AS "day"
+        ),
+        eligible_ids AS (
+          SELECT l.id
+          FROM listings l
+          WHERE ${baseWhere}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM days d
+              LEFT JOIN availability a
+                ON a.listing_id = l.id
+               AND a."day" = d."day"
+              WHERE a."day" IS NULL
+                 OR a.is_available = FALSE
+                 ${capCheck}
+            )
+        )
+        SELECT
+          l.id, l.title, l.description, l.price_per_night, l.city, l.country, l.beds, l.baths, l.is_instant_book
+        FROM listings l
+        JOIN eligible_ids e ON e.id = l.id
+        ORDER BY ${sql.raw(orderBy)}
+        OFFSET ${off}
+        LIMIT ${lim}
+      `);
 
-  if (ids.length > 0) {
-    const photosRes = await db.execute(sql`
-      SELECT listing_id, url, alt
-      FROM photos
-      WHERE listing_id IN (${sql.join(ids, sql`, `)})
-      ORDER BY id ASC
+      const listings = (listRes as any).rows as Array<{
+        id: number; title: string; description: string | null; price_per_night: string;
+        city: string; country: string; beds: number; baths: number; is_instant_book: boolean;
+      }>;
+
+      // photos for page
+      const ids = listings.map(l => l.id);
+      const photosByListing: Record<number, Array<{ url: string; alt: string | null }>> = {};
+      if (ids.length) {
+        const photosRes = await db.execute(sql`
+          SELECT listing_id, url, alt
+          FROM photos
+          WHERE listing_id IN (${sql.join(ids, sql`, `)})
+          ORDER BY id ASC
+        `);
+        for (const row of (photosRes as any).rows as Array<{ listing_id: number; url: string; alt: string | null }>) {
+          (photosByListing[row.listing_id] ??= []).push({ url: row.url, alt: row.alt });
+        }
+      }
+
+      return res.json({
+        data: listings.map(l => ({ ...l, photos: photosByListing[l.id] ?? [] })),
+        page: { total, offset: off, limit: lim, hasMore: off + listings.length < total },
+      });
+    }
+
+    // -------- Without date range: original path --------
+    const totalRes = await db.execute(sql`
+      SELECT COUNT(*)::int AS total
+      FROM listings l
+      WHERE ${baseWhere}
+    `);
+    const total: number = (totalRes as any).rows?.[0]?.total ?? 0;
+
+    const listRes = await db.execute(sql`
+      SELECT
+        l.id, l.title, l.description, l.price_per_night, l.city, l.country, l.beds, l.baths, l.is_instant_book
+      FROM listings l
+      WHERE ${baseWhere}
+      ORDER BY ${sql.raw(orderBy)}
+      OFFSET ${off}
+      LIMIT ${lim}
     `);
 
-    for (const row of (photosRes as any).rows as Array<{ listing_id: number; url: string; alt: string | null }>) {
-      (photosByListing[row.listing_id] ??= []).push({ url: row.url, alt: row.alt });
+    const listings = (listRes as any).rows as Array<{
+      id: number; title: string; description: string | null; price_per_night: string;
+      city: string; country: string; beds: number; baths: number; is_instant_book: boolean;
+    }>;
+
+    const ids = listings.map(l => l.id);
+    const photosByListing: Record<number, Array<{ url: string; alt: string | null }>> = {};
+    if (ids.length) {
+      const photosRes = await db.execute(sql`
+        SELECT listing_id, url, alt
+        FROM photos
+        WHERE listing_id IN (${sql.join(ids, sql`, `)})
+        ORDER BY id ASC
+      `);
+      for (const row of (photosRes as any).rows as Array<{ listing_id: number; url: string; alt: string | null }>) {
+        (photosByListing[row.listing_id] ??= []).push({ url: row.url, alt: row.alt });
+      }
     }
+
+    return res.json({
+      data: listings.map(l => ({ ...l, photos: photosByListing[l.id] ?? [] })),
+      page: { total, offset: off, limit: lim, hasMore: off + listings.length < total },
+    });
+  } catch (e) {
+    console.error('[public.listings] error', e);
+    return res.status(500).json({ error: 'Failed to load listings' });
   }
+});
 
-  // 4) Attach photos[] and return envelope
-  const data = listings.map((l) => ({
-    ...l,
-    photos: photosByListing[l.id] ?? [],
-  }));
+// ---- Listings search (date+guests) — collision-free test endpoint -----------
+// GET /api/listings/search?start=YYYY-MM-DD&end=YYYY-MM-DD&guests=2&city=&min=&max=&instant=&limit=&offset=&sort=
+app.get('/api/listings/search', async (req, res) => {
+  const { city, min, max, instant, limit, offset, sort, start, end, guests } =
+    req.query as Record<string, string | undefined>;
 
-  return res.json({
-    data,
-    page: {
-      total,
-      offset: off,
-      limit: lim,
-      hasMore: off + data.length < total,
-    },
-  });
+  const SORT_MAP: Record<string, string> = {
+    price_asc: 'l.price_per_night ASC',
+    price_desc: 'l.price_per_night DESC',
+    newest: 'l.id DESC',
+  };
+  const orderBy = SORT_MAP[sort ?? ''] ?? 'l.id ASC';
+
+  const ALLOWED_LIMITS = new Set([8, 12, 24, 48]);
+  const DEFAULT_LIMIT = 8;
+  const MIN_PRICE = 0;
+  const MAX_PRICE = 100_000;
+
+  let limParsed = Number(limit);
+  if (!Number.isFinite(limParsed)) limParsed = DEFAULT_LIMIT;
+  const lim = ALLOWED_LIMITS.has(limParsed) ? limParsed : DEFAULT_LIMIT;
+
+  const minParsed = Number(min);
+  const maxParsed = Number(max);
+  let minRM = Number.isFinite(minParsed) ? Math.max(minParsed, MIN_PRICE) : MIN_PRICE;
+  let maxRM = Number.isFinite(maxParsed) ? Math.min(maxParsed, MAX_PRICE) : MAX_PRICE;
+  if (minRM > maxRM) [minRM, maxRM] = [maxRM, minRM];
+
+  const offParsed = Number(offset);
+  const off = Number.isFinite(offParsed) ? Math.max(Math.trunc(offParsed), 0) : 0;
+
+  const isInstant = instant === 'true' || instant === '1';
+  const cityRaw = (city ?? '').trim();
+  const cityKey = cityRaw.replace(/\s+/g, '');
+
+  const isYmd = (s?: string) => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
+  const startStr = start?.trim();
+  const endStr = end?.trim();
+  const useDate = isYmd(startStr) && isYmd(endStr);
+
+  const guestsNum = Number(guests);
+  const needGuests = Number.isFinite(guestsNum) ? Math.max(1, Math.trunc(guestsNum)) : undefined;
+
+  // base WHERE for listings
+  const baseWhere = sql`
+    l.published = true
+    ${cityKey ? sql` AND REPLACE(l.city, ' ', '') ILIKE ${'%' + cityKey + '%'} ` : sql``}
+    AND (l.price_per_night)::numeric BETWEEN ${minRM} AND ${maxRM}
+    ${isInstant ? sql` AND l.is_instant_book = true ` : sql``}
+  `;
+
+  try {
+    if (!useDate) {
+      // fallback to original logic if no dates provided
+      const totalRes = await db.execute(sql`
+        SELECT COUNT(*)::int AS total FROM listings l WHERE ${baseWhere}
+      `);
+      const total: number = (totalRes as any).rows?.[0]?.total ?? 0;
+
+      const listRes = await db.execute(sql`
+        SELECT
+          l.id, l.title, l.description, l.price_per_night, l.city, l.country, l.beds, l.baths, l.is_instant_book
+        FROM listings l
+        WHERE ${baseWhere}
+        ORDER BY ${sql.raw(orderBy)}
+        OFFSET ${off}
+        LIMIT ${lim}
+      `);
+      const listings = (listRes as any).rows as any[];
+
+      // photos
+      const ids = listings.map(l => l.id);
+      const photosByListing: Record<number, Array<{ url: string; alt: string | null }>> = {};
+      if (ids.length) {
+        const photosRes = await db.execute(sql`
+          SELECT listing_id, url, alt
+          FROM photos
+          WHERE listing_id IN (${sql.join(ids, sql`, `)})
+          ORDER BY id ASC
+        `);
+        for (const row of (photosRes as any).rows as Array<{ listing_id: number; url: string; alt: string | null }>) {
+          (photosByListing[row.listing_id] ??= []).push({ url: row.url, alt: row.alt });
+        }
+      }
+
+      return res.json({
+        data: listings.map(l => ({ ...l, photos: photosByListing[l.id] ?? [] })),
+        page: { total, offset: off, limit: lim, hasMore: off + listings.length < total },
+      });
+    }
+
+    // Date range filter (NOT EXISTS anti-join)
+    if ((startStr as string) > (endStr as string)) {
+      return res.status(400).json({ error: 'start must be <= end' });
+    }
+    const capCheck = needGuests ? sql` OR a.guests < ${needGuests} ` : sql``;
+
+    // total
+    const totalRes = await db.execute(sql`
+      WITH days AS (
+        SELECT generate_series(${startStr}::date, ${endStr}::date, '1 day')::date AS "day"
+      )
+      SELECT COUNT(*)::int AS total
+      FROM listings l
+      WHERE ${baseWhere}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM days d
+          LEFT JOIN availability a
+            ON a.listing_id = l.id
+           AND a."day" = d."day"
+          WHERE a."day" IS NULL
+             OR a.is_available = FALSE
+             ${capCheck}
+        )
+    `);
+    const total: number = (totalRes as any).rows?.[0]?.total ?? 0;
+
+    // page
+    const listRes = await db.execute(sql`
+      WITH days AS (
+        SELECT generate_series(${startStr}::date, ${endStr}::date, '1 day')::date AS "day"
+      )
+      SELECT
+        l.id, l.title, l.description, l.price_per_night, l.city, l.country, l.beds, l.baths, l.is_instant_book
+      FROM listings l
+      WHERE ${baseWhere}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM days d
+          LEFT JOIN availability a
+            ON a.listing_id = l.id
+           AND a."day" = d."day"
+          WHERE a."day" IS NULL
+             OR a.is_available = FALSE
+             ${capCheck}
+        )
+      ORDER BY ${sql.raw(orderBy)}
+      OFFSET ${off}
+      LIMIT ${lim}
+    `);
+
+    const listings = (listRes as any).rows as any[];
+
+    // photos
+    const ids = listings.map(l => l.id);
+    const photosByListing: Record<number, Array<{ url: string; alt: string | null }>> = {};
+    if (ids.length) {
+      const photosRes = await db.execute(sql`
+        SELECT listing_id, url, alt
+        FROM photos
+        WHERE listing_id IN (${sql.join(ids, sql`, `)})
+        ORDER BY id ASC
+      `);
+      for (const row of (photosRes as any).rows as Array<{ listing_id: number; url: string; alt: string | null }>) {
+        (photosByListing[row.listing_id] ??= []).push({ url: row.url, alt: row.alt });
+      }
+    }
+
+    return res.json({
+      data: listings.map(l => ({ ...l, photos: photosByListing[l.id] ?? [] })),
+      page: { total, offset: off, limit: lim, hasMore: off + listings.length < total },
+    });
+  } catch (e) {
+    console.error('[public.listings/search] error', e);
+    return res.status(500).json({ error: 'Failed to load listings (search)' });
+  }
 });
 
 // ---- Listing details --------------------------------------------------------
