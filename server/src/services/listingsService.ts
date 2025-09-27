@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 export type ListingCore = {
   title: string;
   city: string;
-  country?: string;             // optional on create; defaults below
+  country?: string;
   pricePerNight: number;
   beds: number;
   baths: number;
@@ -15,47 +15,30 @@ export type ListingCore = {
 export async function listMyListings(hostId: number) {
   const { rows } = await db.execute(sql`
     SELECT
-      id,
-      title,
-      city,
-      country,
-      price_per_night,
-      beds,
-      baths,
-      is_instant_book AS instant,
-      description,
-      published
-    FROM listings
-    WHERE host_id = ${hostId}
-    ORDER BY created_at DESC
+      l.id, l.title, l.city, l.country, l.price_per_night, l.beds, l.baths,
+      l.is_instant_book AS instant, l.published
+    FROM listings l
+    WHERE l.host_id = ${hostId}
+    ORDER BY l.id DESC
   `);
-  return rows;
+  return { items: rows };
 }
 
 export async function createListing(hostId: number, data: ListingCore) {
-  const {
-    title,
-    city,
-    country = "Malaysia",
-    pricePerNight,
-    beds,
-    baths,
-    instant = false,
-    description,
-  } = data;
-
+  const country = data.country ?? "Malaysia";
+  const isInstant = !!data.instant;
   const { rows } = await db.execute(sql`
     INSERT INTO listings
-      (host_id, title, city, country, price_per_night, beds, baths, is_instant_book, description, published)
+      (title, city, country, price_per_night, beds, baths, is_instant_book, host_id, description, published)
     VALUES
-      (${hostId}, ${title}, ${city}, ${country}, ${pricePerNight}, ${beds}, ${baths}, ${instant}, ${description}, false)
+      (${data.title}, ${data.city}, ${country}, ${data.pricePerNight}, ${data.beds}, ${data.baths}, ${isInstant}, ${hostId}, ${data.description}, false)
     RETURNING id
   `);
-  return rows[0];
+  const id = (rows as any)[0]?.id;
+  return { id };
 }
 
 export async function updateListing(id: number, hostId: number, data: Partial<ListingCore>) {
-  // Helper: translate undefined → null so COALESCE keeps existing column value
   const v = <T,>(x: T | undefined) => (x === undefined ? null : x);
 
   await db.execute(sql`
@@ -75,6 +58,17 @@ export async function updateListing(id: number, hostId: number, data: Partial<Li
 }
 
 export async function publishListing(id: number, hostId: number) {
+  // Enforce at least one photo before publishing
+  const countRes = await db.execute(sql`
+    SELECT COUNT(*)::int AS c FROM photos WHERE listing_id = ${id}
+  `);
+  const c = Number((countRes as any).rows?.[0]?.c ?? 0);
+  if (c < 1) {
+    const err: any = new Error("At least one photo is required before publishing.");
+    err.status = 409;
+    throw err;
+  }
+
   await db.execute(sql`
     UPDATE listings SET published = true
     WHERE id = ${id} AND host_id = ${hostId}

@@ -1,48 +1,39 @@
-// sleepinn/server/src/services/storageService.ts
 import crypto from "crypto";
 import { S3Client } from "@aws-sdk/client-s3";
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 
-const REGION = process.env.S3_REGION!;
-const BUCKET = process.env.S3_BUCKET!;
+const REGION = process.env.S3_REGION || "";
+const BUCKET = process.env.S3_BUCKET || "";
 const PRESIGN_EXPIRES = Number(process.env.PRESIGN_EXPIRES || 600);
 const PUBLIC_CDN_BASE = process.env.PUBLIC_CDN_BASE || "";
 
-// You can leave these envs empty for now if you're not testing uploads yet.
-// The presign route will throw a clear error if any are missing.
+// Constructable in dev (keys may be missing; we gate usage in createImagePresign)
 export const s3 = new S3Client({
   region: REGION || "us-east-1",
-  credentials: (process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY)
-    ? {
-        accessKeyId: process.env.S3_ACCESS_KEY_ID!,
-        secretAccessKey: process.env.S3_SECRET_ACCESS_KEY!,
-      }
-    : undefined,
+  credentials:
+    process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY
+      ? {
+          accessKeyId: process.env.S3_ACCESS_KEY_ID!,
+          secretAccessKey: process.env.S3_SECRET_ACCESS_KEY!,
+        }
+      : undefined,
 });
 
-/**
- * Create a presigned POST for image upload.
- * Returns { url, fields, key, publicUrl }.
- */
+/** REAL presign (only works if S3 envs exist). */
 export async function createImagePresign(listingId: number, contentType: string) {
-  if (!REGION || !BUCKET) {
-    throw new Error("Storage not configured: set S3_REGION and S3_BUCKET in .env");
-  }
+  if (!REGION || !BUCKET) throw new Error("S3 not configured");
   if (!process.env.S3_ACCESS_KEY_ID || !process.env.S3_SECRET_ACCESS_KEY) {
-    throw new Error("Storage keys missing: set S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY in .env");
+    throw new Error("S3 keys missing");
   }
-  if (!contentType.startsWith("image/")) {
-    throw new Error("Unsupported content type (must start with image/)");
-  }
+  if (!contentType.startsWith("image/")) throw new Error("Unsupported content type");
 
   const ext = contentType.split("/")[1] || "jpg";
   const key = `listings/${listingId}/${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
-
   const { url, fields } = await createPresignedPost(s3, {
     Bucket: BUCKET,
     Key: key,
     Conditions: [
-      ["content-length-range", 0, 5_000_000],
+      ["content-length-range", 0, 10_000_000],
       ["starts-with", "$Content-Type", "image/"],
     ],
     Fields: { "Content-Type": contentType },
@@ -55,3 +46,13 @@ export async function createImagePresign(listingId: number, contentType: string)
 
   return { url, fields, key, publicUrl };
 }
+
+/** DEV presign: no real upload; returns a stable image URL. */
+// DEV presign: no real upload; always-returning placeholder URL
+export function createDevPresign(_contentType: string) {
+  const key = `dev/${Date.now()}.jpg`;
+  // solid, fast CDN; no CORS gotchas
+  const publicUrl = "https://placehold.co/1024x768/png?text=SleepInn+Dev+Photo";
+  return { url: "about:blank", fields: {}, key, publicUrl };
+}
+

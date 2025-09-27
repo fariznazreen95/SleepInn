@@ -12,26 +12,37 @@ import photos from './routes/photos';
 import changePassword from "./routes/changePassword";
 import availability from "./routes/availability";
 import pricing from "./routes/pricing";
+import bookings from "./routes/bookings";
+import stripeRoutes from "./routes/stripe";
+import stripeWebhook from "./webhooks/stripeWebhook";
+
 
 const app = express();
 
-app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
+app.use(cors({
+  origin: ["http://localhost:5173", "http://127.0.0.1:5173"], // add your web origin(s)
+  credentials: true, // <— REQUIRED for cookies
+  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+
+// ⛳ ANCHOR: STRIPE-WEBHOOK-MOUNT (must be BEFORE express.json())
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), stripeWebhook);
 app.use(express.json());
 app.use(cookieParser());
-
-app.use("/api", availability);
 
 // Auth mounts
 app.use('/api/auth', authRoutes);
 app.use('/api', meRoute);
-
+app.use("/api", availability);
 app.use("/api", pricing);
-
 app.use("/api/change-password", changePassword);
-
 app.use('/api/host/listings', hostListings);
 app.use('/api/host/listings', photos); // /:id/photos/confirm
 app.use('/api/photos', photos);        // /photos/presign
+app.use("/api/bookings", bookings);
+app.use("/api/stripe", stripeRoutes);
+
 
 // Quick protected test route
 app.get('/api/protected', requireAuth(), (req, res) => {
@@ -456,8 +467,36 @@ app.get('/api/listings/:id', async (req, res) => {
   }
 });
 
+// ⛳ ANCHOR: PENDING-SWEEPER (unified: expires_at OR created_at+hold)
+function startPendingSweeper() {
+  // Clamp between 5–120 minutes just in case
+  const holdMins = Math.max(5, Math.min(120, Number(process.env.BOOKING_HOLD_MINUTES || 30)));
+  const everyMs  = Number(process.env.PENDING_SWEEP_INTERVAL_MS || 60_000); // 1m
+
+  async function sweepOnce() {
+    try {
+      await db.execute(sql`
+        UPDATE bookings
+        SET status = 'expired'
+        WHERE status = 'pending'
+          AND created_at < NOW() - (${holdMins}::text || ' minutes')::interval
+      `);
+    } catch (e: any) {
+      console.error("[pending-sweeper] err:", e?.message, e?.code ?? "", e);
+    }
+
+  }
+
+
+  sweepOnce();                 // kick immediately
+  setInterval(sweepOnce, everyMs);
+}
+
+
 // Boot
-app.listen(ServerConfig.PORT, () => {
+app.listen(ServerConfig.PORT, "0.0.0.0", () => {
   console.log(`API on http://localhost:${ServerConfig.PORT}`);
   console.log('Routes: GET /health, GET /api/cities, GET /api/listings, GET /api/listings/:id');
+  startPendingSweeper(); // ✅ start after server is live
 });
+

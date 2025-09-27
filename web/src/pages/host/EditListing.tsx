@@ -6,10 +6,16 @@ import { api } from "../../lib/api";
 import PhotoUploader from "../../components/PhotoUploader";
 
 export default function EditListing() {
-  const { id } = useParams();
+  const { id: rawId } = useParams();
+  const id = rawId && rawId !== "new" && rawId !== "undefined" ? rawId : undefined;
   const isNew = !id;
   const { user, loading } = useSession();
+  
   const nav = useNavigate();
+  useEffect(() => {
+    if (rawId === "undefined") nav("/host/new/edit", { replace: true });
+  }, [rawId, nav]);
+  
   const [form, setForm] = useState({
     title: "", city: "", pricePerNight: 100, beds: 1, baths: 1, instant: false, description: ""
   });

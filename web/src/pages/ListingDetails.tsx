@@ -371,6 +371,23 @@ export default function ListingDetails() {
               </div>
             )}
             {/* ANCHOR: QUOTE_PANEL_END */}
+            {/* Reserve CTA */}
+            <div style={{ marginTop: 10 }}>
+              <a
+                href={`/checkout?listingId=${item?.id}&start=${start || ""}&end=${end || ""}&guests=${guests || "1"}`}
+                style={{
+                  display: "inline-block",
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  border: "1px solid #1c3b5a",
+                  background: "#0b1220",
+                  color: "#e5e7eb",
+                  textDecoration: "none"
+                }}
+              >
+                Reserve
+              </a>
+            </div>
 
 
             {/* Gallery */}
