@@ -37,7 +37,7 @@ export default function HostDashboard() {
     <div style={{ padding: 24 }}>
       <h1>Host Dashboard</h1>
       <div style={{ marginBottom: 12 }}>
-        <Link to="/host/new">New Listing</Link>
+        <Link to="/host/new/edit">New Listing</Link>
       </div>
       <ul style={{ display: "grid", gap: 12 }}>
         {items.map(it => (
