@@ -1,7 +1,9 @@
+// server/src/routes/pricing.ts
 import { Router } from "express";
-import { db } from "../db";
-import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { sql } from "drizzle-orm";
+import { db } from "../db";
+import { computeQuote } from "../services/quote";
 
 const router = Router();
 
@@ -15,94 +17,120 @@ const Body = z.object({
   guests: z.coerce.number().int().min(1).default(1),
 });
 
-// UTC-safe inclusive nights
-function nightsInclusive(start: string, end: string): number {
-  const s = new Date(start + "T00:00:00Z");
-  const e = new Date(end + "T00:00:00Z");
-  if (!Number.isFinite(s.getTime()) || !Number.isFinite(e.getTime())) return 0;
-  return Math.floor((e.getTime() - s.getTime()) / 86400000) + 1;
-}
-
+// POST /api/pricing/quote
 router.post("/pricing/quote", async (req, res) => {
+  // 🔎 trap: log exactly what the server received
+  console.log("[pricing.quote] body:", req.body);
+
   try {
     const { listingId, start, end, guests } = Body.parse(req.body);
     if (start > end) return res.status(400).json({ error: "start must be <= end" });
 
-    const nights = nightsInclusive(start, end);
-    if (nights <= 0) return res.status(400).json({ error: "Invalid date range" });
-
-    // Base price from listings (published only)
-    const baseRes = await db.execute(sql`
-      SELECT (price_per_night)::numeric AS base_price, city, country
-      FROM listings
-      WHERE id = ${listingId} AND published = true
-      LIMIT 1
-    `);
-    const baseRow = (baseRes as any).rows?.[0];
-    if (!baseRow) return res.status(404).json({ error: "Listing not found" });
-
-    const basePrice = Number(baseRow.base_price);
-
-    // Build nightly rows for range; require every day to be present & OK
-    const quoteRes = await db.execute(sql`
-      WITH days AS (
-        SELECT generate_series(${start}::date, ${end}::date, '1 day')::date AS "day"
-      ),
-      nightly AS (
-        SELECT
-          d."day",
-          COALESCE(a.price_override::numeric, ${basePrice}) AS nightly_price,
-          a.is_available,
-          a.guests
-        FROM days d
-        LEFT JOIN availability a
-          ON a.listing_id = ${listingId}
-         AND a."day" = d."day"
-      ),
-      missing AS (
-        SELECT "day"
-        FROM nightly
-        WHERE is_available IS DISTINCT FROM TRUE  -- NULL or FALSE -> missing
-           OR guests IS NULL
-           OR guests < ${guests}
-      )
-      SELECT
-        (SELECT COUNT(*) FROM days)::int AS nights_expected,
-        (SELECT COUNT(*) FROM nightly WHERE is_available = TRUE AND guests >= ${guests})::int AS nights_ok,
-        (SELECT COALESCE(SUM(nightly_price), 0) FROM nightly WHERE is_available = TRUE AND guests >= ${guests})::numeric AS subtotal,
-        (SELECT COALESCE(json_agg("day"::text), '[]'::json) FROM missing) AS missing_days
-    `);
-
-    const q = (quoteRes as any).rows?.[0];
-    const nightsExpected: number = q?.nights_expected ?? 0;
-    const nightsOk: number = q?.nights_ok ?? 0;
-    const missingDays: string[] = q?.missing_days ?? [];
-
-    if (nightsOk !== nightsExpected) {
-      return res.status(409).json({
-        error: "Unavailable for all nights",
-        missingDays,
-      });
-    }
-
-    const subtotal = Number(q.subtotal);
-    const serviceFee = Math.round(subtotal * 0.10 * 100) / 100; // 10% placeholder
-    const total = Math.round((subtotal + serviceFee) * 100) / 100;
+    const q = await computeQuote({
+      listingId,
+      start,
+      end,
+      guests,
+      feeRate: 0.10, // tweak here if needed
+    });
 
     return res.json({
       listingId,
       currency: "MYR",
-      nights,
-      nightlyBase: basePrice,
-      subtotal,
-      fees: { service: serviceFee },
-      total,
-      meta: { city: baseRow.city, country: baseRow.country, start, end, guests },
+      nights: q.nights,
+      nightlyBase: q.nightlyBase,
+      effectiveNightly: q.effectiveNightly,
+      mixedPricing: q.mixedPricing,
+      subtotal: q.subtotal,
+      fees: { service: q.serviceFee },
+      total: q.total,
+      meta: { city: q.city, country: q.country, start, end, guests },
     });
   } catch (e: any) {
+    if (e?.status === 409) {
+      return res.status(409).json({
+        error: "Unavailable for all nights",
+        missingDays: e.missingDays ?? [],
+      });
+    }
     console.error("[pricing.quote] error", e);
     const msg = e?.issues ? "Invalid payload" : "Failed to compute quote";
     return res.status(500).json({ error: msg });
+  }
+});
+
+// GET /api/pricing/quote/diag?listingId=13&start=2025-10-20&end=2025-10-21&guests=1
+router.get("/pricing/quote/diag", async (req, res) => {
+  try {
+    const listingId = Number(req.query.listingId ?? 0);
+    const start = String(req.query.start ?? "");
+    const end   = String(req.query.end   ?? "");
+    const guests = Number(req.query.guests ?? 1);
+
+    const isYmd = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+    if (!listingId || !isYmd(start) || !isYmd(end)) {
+      return res.status(400).json({ error: "listingId/start/end required YYYY-MM-DD" });
+    }
+
+    // 1) Postgres end-exclusive nights
+    const nightsPGRes: any = await db.execute(sql`
+      SELECT GREATEST(0, (${end}::date - ${start}::date))::int AS nights
+    `);
+    const nightsPG = Number(nightsPGRes?.rows?.[0]?.nights ?? 0);
+
+    // 2) Exact day list (end-exclusive)
+    const daysRes: any = await db.execute(sql`
+      SELECT to_char(d, 'YYYY-MM-DD') AS day
+      FROM generate_series(${start}::date, (${end}::date - INTERVAL '1 day'), '1 day') AS d
+      ORDER BY d
+    `);
+    const seriesDays: string[] = (daysRes?.rows ?? []).map((r: any) => String(r.day));
+
+    // 3) Availability rows considered (end-exclusive)
+    const availRes: any = await db.execute(sql`
+      SELECT
+        a."day"::text AS day,
+        a.is_available,
+        a.guests AS capacity,
+        COALESCE(a.price_override::numeric, l.price_per_night::numeric) AS nightly_price
+      FROM availability a
+      JOIN listings l ON l.id = a.listing_id
+      WHERE a.listing_id = ${listingId}
+        AND a."day" >= ${start}::date
+        AND a."day" <  ${end}::date
+      ORDER BY a."day"
+    `);
+    const avail = (availRes?.rows ?? []).map((r: any) => ({
+      day: String(r.day).slice(0, 10),
+      is_available: r.is_available === true,
+      capacity: Number(r.capacity),
+      nightly_price: Number(r.nightly_price),
+    }));
+
+    // 4) Quick subtotal/missing from that data
+    const byDay = new Map(avail.map((r: any) => [r.day, r]));
+    const missing: string[] = [];
+    let subtotalFromAvail = 0;
+    for (const d of seriesDays) {
+      const row = byDay.get(d);
+      if (!row || !row.is_available || !(row.capacity >= guests)) {
+        missing.push(d);
+      } else {
+        subtotalFromAvail += row.nightly_price;
+      }
+    }
+
+    return res.json({
+      received: { listingId, start, end, guests },
+      nightsPG,
+      seriesDays,
+      avail,
+      subtotalFromAvail,
+      missing,
+    });
+  } catch (e: any) {
+    console.error("[pricing.quote.diag] error", e);
+    res.status(500).json({ error: "diag failed" });
   }
 });
 

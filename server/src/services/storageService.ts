@@ -44,15 +44,13 @@ export async function createImagePresign(listingId: number, contentType: string)
     ? `${PUBLIC_CDN_BASE}/${key}`
     : `https://${BUCKET}.s3.${REGION}.amazonaws.com/${key}`;
 
-  return { url, fields, key, publicUrl };
+  return { uploadUrl: url, fields, key, publicUrl };
 }
 
 /** DEV presign: no real upload; returns a stable image URL. */
-// DEV presign: no real upload; always-returning placeholder URL
 export function createDevPresign(_contentType: string) {
   const key = `dev/${Date.now()}.jpg`;
-  // solid, fast CDN; no CORS gotchas
   const publicUrl = "https://placehold.co/1024x768/png?text=SleepInn+Dev+Photo";
-  return { url: "about:blank", fields: {}, key, publicUrl };
+  // IMPORTANT: no uploadUrl/fields to prevent the client from trying to PUT "about:blank"
+  return { mode: "dev", uploadUrl: null, publicUrl, key };
 }
-

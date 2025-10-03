@@ -1,14 +1,12 @@
 import { Router } from "express";
 import requireAuth from "../middleware/requireAuth";
-import { requireOwner } from "../middleware/ownerGuard";
-import { z } from "zod";
-import { createListing, listMyListings, publishListing, updateListing } from "../services/listingsService";
-import { sql } from "drizzle-orm";
 import { db } from "../db";
+import { sql } from "drizzle-orm";
+import { z } from "zod";
+import { createListing, updateListing, publishListing } from "../services/listingsService";
 
 const router = Router();
 
-// Coerce numbers so form posts like "123" are accepted
 const upsertSchema = z.object({
   title: z.string().min(3),
   city: z.string().min(2),
@@ -20,53 +18,144 @@ const upsertSchema = z.object({
   description: z.string().min(1),
 });
 
-// Create new listing → returns { id }
-router.post("/", requireAuth("host"), async (req: any, res) => {
+// CREATE
+router.post("/listings", requireAuth("host"), async (req: any, res) => {
   try {
     const data = upsertSchema.parse(req.body);
-    const created = await createListing(req.user.id, data);
+    const created = await createListing(Number(req.user.id), data);
     return res.status(201).json(created);
   } catch (e: any) {
     return res.status(400).json({ error: e?.message || "Invalid payload" });
   }
 });
 
-// List mine
-router.get("/mine", requireAuth("host"), async (req: any, res) => {
-  const out = await listMyListings(req.user.id);
-  return res.json(out);
+// LIST MINE
+router.get("/listings", requireAuth("host"), async (req: any, res) => {
+  const hostId = Number(req.user.id);
+  if (!Number.isFinite(hostId)) {
+    return res.status(400).json({ error: "Invalid user id" });
+  }
+  try {
+    const r: any = await db.execute(sql`
+      SELECT
+        l.id,
+        l.title,
+        l.city,
+        l.country,
+        l.price_per_night::numeric AS "pricePerNight",
+        l.beds,
+        l.baths,
+        (l.published IS TRUE)       AS "published",
+        (l.is_instant_book IS TRUE) AS "instant",
+        CASE WHEN l.published IS TRUE THEN 'published' ELSE 'draft' END AS "status",
+        COALESCE((
+          SELECT p.url
+          FROM photos p
+          WHERE p.listing_id = l.id
+          ORDER BY p.id DESC
+          LIMIT 1
+        ), '') AS "coverUrl",
+        l.created_at AS "createdAt"
+      FROM listings l
+      WHERE l.host_id = ${hostId}
+      ORDER BY l.id DESC
+    `);
+    return res.json(r.rows ?? []);
+  } catch (e: any) {
+    console.error("[host:listings:list]", e);
+    return res.status(500).json({ error: e?.message || "Failed to load listings" });
+  }
 });
 
-// Update listing
-router.put("/:id", requireAuth("host"), requireOwner, async (req: any, res) => {
+// READ ONE
+router.get("/listings/:id", requireAuth("host"), async (req: any, res) => {
+  const id = Number(req.params.id);
+  const hostId = Number(req.user.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
+  if (!Number.isFinite(hostId)) return res.status(400).json({ error: "Invalid user id" });
+
   try {
-    const id = Number(req.params.id);
+    const r: any = await db.execute(sql`
+      SELECT
+        l.id,
+        l.host_id,
+        l.title,
+        l.city,
+        l.country,
+        l.price_per_night::numeric AS "pricePerNight",
+        l.beds,
+        l.baths,
+        l.description,
+        (l.published IS TRUE)       AS "published",
+        (l.is_instant_book IS TRUE) AS "instant",
+        CASE WHEN l.published IS TRUE THEN 'published' ELSE 'draft' END AS "status",
+        COALESCE((
+          SELECT p.url
+          FROM photos p
+          WHERE p.listing_id = l.id
+          ORDER BY p.id DESC
+          LIMIT 1
+        ), '') AS "coverUrl",
+        l.created_at AS "createdAt"
+      FROM listings l
+      WHERE l.id = ${id} AND l.host_id = ${hostId}
+      LIMIT 1
+    `);
+
+    const row = r?.rows?.[0];
+    if (!row) return res.status(404).json({ error: "Not found" });
+    return res.json(row);
+  } catch (e: any) {
+    console.error("[host:listings:read]", e);
+    return res.status(500).json({ error: e?.message || "Failed to fetch listing" });
+  }
+});
+
+// UPDATE
+router.put("/listings/:id", requireAuth("host"), async (req: any, res) => {
+  const id = Number(req.params.id);
+  const hostId = Number(req.user.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
+  if (!Number.isFinite(hostId)) return res.status(400).json({ error: "Invalid user id" });
+
+  try {
+    const own: any = await db.execute(sql`
+      SELECT 1 FROM listings WHERE id=${id} AND host_id=${hostId} LIMIT 1
+    `);
+    if (!own.rows?.length) return res.status(403).json({ error: "Not your listing" });
+
     const data = upsertSchema.partial().parse(req.body);
-    const out = await updateListing(id, req.user.id, data);
+    const out = await updateListing(id, hostId, data);
     return res.json(out);
   } catch (e: any) {
     return res.status(400).json({ error: e?.message || "Invalid payload" });
   }
 });
 
-// Publish (enforce at least one photo before allowing publish)
-router.post("/:id/publish", requireAuth("host"), requireOwner, async (req: any, res) => {
+// PUBLISH
+router.post("/listings/:id/publish", requireAuth("host"), async (req: any, res) => {
   const id = Number(req.params.id);
+  const hostId = Number(req.user.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
+  if (!Number.isFinite(hostId)) return res.status(400).json({ error: "Invalid user id" });
+
   try {
-    // ANCHOR: ENFORCE-PHOTO-BEFORE-PUBLISH
-    const photos = await db.execute(sql`
-      SELECT 1 FROM photos WHERE listing_id = ${id} LIMIT 1
+    const own: any = await db.execute(sql`
+      SELECT 1 FROM listings WHERE id=${id} AND host_id=${hostId} LIMIT 1
     `);
-    if (!(photos as any).rows.length) {
+    if (!own.rows?.length) return res.status(403).json({ error: "Not your listing" });
+
+    const photos: any = await db.execute(sql`
+      SELECT 1 FROM photos WHERE listing_id=${id} LIMIT 1
+    `);
+    if (!photos.rows?.length) {
       return res.status(400).json({ error: "Add at least one photo before publishing." });
     }
-    // ANCHOR: ENFORCE-PHOTO-BEFORE-PUBLISH-END
 
-    // Delegate to service (sets published flag, etc.)
-    const out = await publishListing(id, req.user.id);
+    const out = await publishListing(id, hostId);
     return res.json(out);
   } catch (e: any) {
-    return res.status(e?.status || 500).json({ error: e?.message || "Publish failed" });
+    return res.status(500).json({ error: e?.message || "Publish failed" });
   }
 });
 
