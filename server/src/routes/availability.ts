@@ -118,7 +118,7 @@ router.get(
   
         const { rows } = await db.execute(sql`
           WITH days AS (
-            SELECT generate_series(${start}::date, ${end}::date, '1 day')::date AS "day"
+            SELECT generate_series(${start}::date, (${end}::date - INTERVAL '1 day'), '1 day')::date AS "day"
           )
           SELECT
             d."day"::text                         AS day,
@@ -204,7 +204,7 @@ router.get("/diag/listings-base", async (req, res) => {
   
       const { rows } = await db.execute(sql`
         WITH days AS (
-          SELECT generate_series(${start}::date, ${end}::date, '1 day')::date AS "day"
+          SELECT generate_series(${start}::date, (${end}::date - INTERVAL '1 day'), '1 day')::date AS "day"
         )
         SELECT l.id
         FROM listings l

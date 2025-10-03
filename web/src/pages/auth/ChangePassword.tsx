@@ -1,16 +1,16 @@
 import { useState } from "react";
 import { API } from "../../lib/config";
+import { useToast } from "../../components/Toast";
 
 export default function ChangePassword() {
   const [oldPassword, setOld] = useState("");
   const [newPassword, setNew] = useState("");
-  const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const toast = useToast();
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
-    setMsg("");
     try {
       const res = await fetch(`${API}/api/change-password`, {
         method: "POST",
@@ -19,28 +19,25 @@ export default function ChangePassword() {
         body: JSON.stringify({ oldPassword, newPassword }),
       });
       if (!res.ok) throw new Error(await res.text());
-      setMsg("✅ Password changed successfully.");
+      toast.push("✅ Password changed successfully.");
       setOld(""); setNew("");
-    } catch (err: any) {
-      setMsg("❌ " + (err.message || "Failed to change password"));
+    } catch (e: any) {
+      toast.push(e?.message || "Failed to change password.");
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div style={{ maxWidth: 420, margin: "24px auto" }}>
-      <h1>Change Password</h1>
-      <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
-        <label>Old password
-          <input type="password" value={oldPassword} onChange={e => setOld(e.target.value)} required />
-        </label>
-        <label>New password
-          <input type="password" value={newPassword} onChange={e => setNew(e.target.value)} required />
-        </label>
-        <button disabled={busy} type="submit">{busy ? "Saving…" : "Save"}</button>
-      </form>
-      {msg && <div style={{ marginTop: 12 }}>{msg}</div>}
-    </div>
+    <form onSubmit={submit} style={{ maxWidth: 480, margin: "0 auto" }}>
+      <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 12 }}>Account · Change Password</h2>
+      <div style={{ display: "grid", gap: 10 }}>
+        <input placeholder="Current password" type="password" value={oldPassword} onChange={e => setOld(e.target.value)} required/>
+        <input placeholder="New password" type="password" value={newPassword} onChange={e => setNew(e.target.value)} required/>
+        <button disabled={busy} style={{ padding: "10px 12px", borderRadius: 10, opacity: busy ? 0.6 : 1 }}>
+          {busy ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </form>
   );
 }

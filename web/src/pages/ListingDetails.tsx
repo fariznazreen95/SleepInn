@@ -36,7 +36,7 @@ export default function ListingDetails() {
 
   const [quote, setQuote]         = useState<null | {
     listingId: number; currency: string; nights: number;
-    nightlyBase: number; subtotal: number; total: number;
+    nightlyBase: number; effectiveNightly: number; mixedPricing: boolean; subtotal: number; total: number;
     fees: { service: number };
     meta: { city: string; country: string; start: string; end: string; guests: number };
   }>(null);
@@ -200,6 +200,9 @@ export default function ListingDetails() {
 
 
   return (
+   
+
+    
     <div
       style={{
         background: "rgba(6,12,20,0.7)",
@@ -227,34 +230,92 @@ export default function ListingDetails() {
           boxShadow: "0 20px 50px rgba(0,0,0,0.5)",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2 style={{ fontSize: 22, fontWeight: 900, marginRight: 12 }}>
+{/* ==== HEADER STRIP (replaces the old title + Close row) ==== */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 900, marginRight: 12 }}>
             {item ? item.title : "Listing"}
-          </h2>
+          </div>
+
+          {/* City / Country chips */}
+          <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {item?.city && (
+              <span
+                style={{
+                  display: "inline-block",
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  border: `1px solid ${COLORS.border}`,
+                  background: "#0f1b2b",
+                  color: COLORS.text,
+                  fontSize: 12,
+                }}
+              >
+                {item.city}
+              </span>
+            )}
+            {item?.country && (
+              <span
+                style={{
+                  display: "inline-block",
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  border: `1px solid ${COLORS.border}`,
+                  background: "#0f1b2b",
+                  color: COLORS.sub,
+                  fontSize: 12,
+                }}
+              >
+                {item.country}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 8 }}>
           <button
             onClick={() => navigate({ pathname: "/", search: search.toString() })}
             style={{
-              border: `1px solid ${COLORS.gold}`,
+              border: `1px solid ${COLORS.border}`,
               borderRadius: 10,
               padding: "8px 12px",
-              background: COLORS.gold,
-              color: "#0b1220",
-              fontWeight: 800,
+              background: "#0b1220",
+              color: COLORS.text,
+              fontWeight: 700,
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = COLORS.goldDark)}
-            onMouseLeave={(e) => (e.currentTarget.style.background = COLORS.gold)}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "#0e1a2b")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "#0b1220")}
           >
-            Close
+            ← Back
+          </button>
+
+          <button
+            onClick={() => navigate("/trips")}
+            style={{
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: 10,
+              padding: "8px 12px",
+              background: "#0b1220",
+              color: COLORS.text,
+              fontWeight: 700,
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "#0e1a2b")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "#0b1220")}
+          >
+            My Trips
           </button>
         </div>
+      </div>
+{/* ==== HEADER STRIP END ==== */}
+
 
         {loading && <div style={{ marginTop: 10, color: COLORS.sub }}>Loading…</div>}
         {err && <div style={{ marginTop: 10, color: "salmon" }}>{err}</div>}
 
         {item && (
           <>
-            <div style={{ color: COLORS.sub }}>{item.city}, {item.country}</div>
-
+            
             <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
               <span>
                 RM <b style={{ color: COLORS.gold }}>{Number(item.price_per_night).toFixed(2)}</b> / night
@@ -362,11 +423,11 @@ export default function ListingDetails() {
               >
                 <div style={{ fontWeight: 800, marginBottom: 6 }}>Price breakdown</div>
                 <div>Nights: {quote.nights}</div>
-                <div>Nightly: {quote.currency} {quote.nightlyBase}</div>
-                <div>Subtotal: {quote.currency} {quote.subtotal}</div>
-                <div>Service fee: {quote.currency} {quote.fees.service}</div>
+                <div>Nightly: {quote.currency} {Number(quote.effectiveNightly ?? quote.nightlyBase).toFixed(2)}</div>
+                <div>Subtotal: {quote.currency} {Number(quote.subtotal).toFixed(2)}</div>
+                <div>Service fee: {quote.currency} {Number(quote.fees?.service ?? 0).toFixed(2)}</div>
                 <div style={{ fontWeight: 900, marginTop: 6 }}>
-                  Total: {quote.currency} {quote.total}
+                  Total: {quote.currency} {Number(quote.total).toFixed(2)}
                 </div>
               </div>
             )}

@@ -13,7 +13,7 @@
     "allowSyntheticDefaultImports": true,
 
     // Type Declarations
-    // "types": ["node"],               // optional; auto-resolves from devDeps
+    "types": ["node"],               // optional; auto-resolves from devDeps
     // "lib": ["esnext"],
 
     // Other Outputs
@@ -33,5 +33,7 @@
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "skipLibCheck": true
-  }
+  },
+  "include": ["src", "src/types/**/*.d.ts"],   // <-- add this
+  "exclude": ["dist", "node_modules"]
 }

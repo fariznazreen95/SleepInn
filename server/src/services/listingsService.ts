@@ -69,9 +69,34 @@ export async function publishListing(id: number, hostId: number) {
     throw err;
   }
 
+  // Publish (host ownership enforced by route)
   await db.execute(sql`
     UPDATE listings SET published = true
     WHERE id = ${id} AND host_id = ${hostId}
   `);
+
+  // Auto-seed availability for the next 180 days, if missing.
+  // - Set as available
+  // - Capacity = beds (fallback 1)
+  // - price_override = NULL (use base price_per_night)
+  await db.execute(sql`
+    WITH cfg AS (
+      SELECT
+        l.id AS listing_id,
+        GREATEST(1, COALESCE(l.beds, 1))::int AS capacity
+      FROM listings l
+      WHERE l.id = ${id} AND l.host_id = ${hostId}
+    ),
+    days AS (
+      SELECT generate_series(CURRENT_DATE, CURRENT_DATE + INTERVAL '180 days', '1 day')::date AS day
+    )
+    INSERT INTO availability (listing_id, "day", is_available, guests, price_override)
+    SELECT cfg.listing_id, d.day, TRUE, cfg.capacity, NULL
+    FROM cfg CROSS JOIN days d
+    LEFT JOIN availability a
+      ON a.listing_id = cfg.listing_id AND a."day" = d.day
+    WHERE a.listing_id IS NULL
+  `);
+
   return { ok: true };
 }
