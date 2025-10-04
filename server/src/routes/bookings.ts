@@ -7,6 +7,37 @@ import { db } from "../db";
 import { sql } from "drizzle-orm";
 import Stripe from "stripe";
 
+//////////////////////////////////////
+
+// ====== booking date resolver (shared logic) ======
+let cachedColsMine: { startCol: string | null; endCol: string | null } | null = null;
+
+async function resolveBookingDateColsMine(): Promise<{ startCol: string | null; endCol: string | null }> {
+  if (cachedColsMine) return cachedColsMine;
+
+  const startCands = ["start_date","start_day","check_in","checkin","start"];
+  const endCands   = ["end_date","end_day","check_out","checkout","end"];
+
+  async function firstExisting(cands: string[]): Promise<string | null> {
+    const res: any = await db.execute(sql`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name  = 'bookings'
+        AND column_name IN (${sql.join(cands.map(c => sql`${c}`), sql`, `)})
+      ORDER BY array_position(ARRAY[${sql.join(cands.map(c => sql`${c}`), sql`, `)}]::text[], column_name)
+      LIMIT 1
+    `);
+    return res?.rows?.[0]?.column_name ?? null;
+  }
+
+  cachedColsMine = { startCol: await firstExisting(startCands), endCol: await firstExisting(endCands) };
+  return cachedColsMine;
+}
+
+
+/////////////////////////////////////
+
 const router = Router();
 
 const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY || "";
@@ -104,22 +135,100 @@ async function getPaymentIntentForBooking(bookingId: number, stripeSessionId?: s
 
 // ---------- ORDER MATTERS: put /mine BEFORE any /:id routes ----------
 
-// My trips
+// My trips (normalized for UI)
 router.get("/mine", requireAuth(), async (req: any, res: Response) => {
   try {
-    const d = await discover();
-    const r: any = await db.execute(sql`
-      SELECT b.*, l.title, l.city
+    // 1) dates (flexible names)
+    const { startCol, endCol } = await resolveBookingDateColsMine();
+
+    // 2) other columns (user / guests etc.)
+    const d = await discover(); // gives userCol, guestsCol, listingCol, etc.
+
+    const selectDates =
+      startCol && endCol
+        ? sql`to_char(${sql.raw(`b."${startCol}"`)}::date, 'YYYY-MM-DD') AS "start_date",
+              to_char(${sql.raw(`b."${endCol}"`)}::date,  'YYYY-MM-DD') AS "end_date",`
+        : sql`NULL::text AS "start_date", NULL::text AS "end_date",`;
+
+    // guests: use discovered column if present, else constant 1
+    const guestsExpr = d.guestsCol
+      ? sql`COALESCE(${sql.raw(`b."${d.guestsCol}"`)}, 1)`
+      : sql`1`;
+
+    // nights (fallback 1)
+    const nightsExpr =
+      startCol && endCol
+        ? sql`GREATEST(1, (${sql.raw(`b."${endCol}"`)}::date - ${sql.raw(`b."${startCol}"`)}::date))::int`
+        : sql`1`;
+
+    const rows: any = await db.execute(sql`
+      SELECT
+        b.id,
+        b.listing_id,
+        l.title,
+        l.city,
+        ${guestsExpr} AS guests,
+
+        ${selectDates}   -- -> start_date, end_date
+
+        -- raw statuses (debug)
+        COALESCE(b.status, '')     AS booking_status,
+        COALESCE(p.status, 'none') AS payment_status,
+
+        -- unified UI status for trips
+        CASE
+          WHEN LOWER(COALESCE(b.status,'')) = 'canceled' THEN 'canceled'
+          WHEN LOWER(COALESCE(b.status,'')) = 'expired'  THEN 'expired'
+          WHEN LOWER(COALESCE(p.status,''))  = 'refunded'
+            OR LOWER(COALESCE(b.status,'')) = 'refunded' THEN 'refunded'
+          WHEN LOWER(COALESCE(p.status,'')) IN ('succeeded','paid')
+            OR LOWER(COALESCE(b.status,'')) = 'paid'     THEN 'paid'
+          ELSE 'pending'
+        END AS status,
+
+        -- amounts for fmtAnyAmount (prefer payments, fallback to nights * price)
+        COALESCE(
+          p.amount_cents,
+          (${nightsExpr} * (l.price_per_night)::numeric * 100)::int
+        ) AS amount_cents,
+        COALESCE(p.currency, 'MYR') AS currency,
+
+        -- cover image (first photo if any)
+        ph.url AS cover_url
+
       FROM bookings b
-      JOIN listings l ON l.id = b.${sql.raw(d.listingCol)}
+      JOIN listings l ON l.id = b.listing_id
+
+      -- latest payment (if any)
+      LEFT JOIN LATERAL (
+        SELECT pp.*
+        FROM payments pp
+        WHERE pp.booking_id = b.id
+        ORDER BY pp.created_at DESC
+        LIMIT 1
+      ) p ON TRUE
+
+      -- first photo for the listing (optional)
+      LEFT JOIN LATERAL (
+        SELECT url
+        FROM photos
+        WHERE listing_id = b.listing_id
+        ORDER BY id ASC
+        LIMIT 1
+      ) ph ON TRUE
+
       WHERE b.${sql.raw(d.userCol)} = ${req.user.id}
-      ORDER BY b.created_at DESC
+      ORDER BY b.id DESC
     `);
-    res.json(r.rows);
-  } catch {
+
+    res.json(rows.rows ?? []);
+  } catch (e) {
+    console.error("[bookings.mine]", e);
     res.status(500).json({ error: "Failed to load trips" });
   }
 });
+
+
 
 // Host view
 router.get("/host/all", requireAuth("host"), async (req: any, res: Response) => {

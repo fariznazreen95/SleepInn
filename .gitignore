@@ -14,4 +14,23 @@ Thumbs.db
 
 # zips & misc
 *.zip
+*.log# Node
+node_modules
+pnpm-store
+dist
+build
+.cache
+.dts
 *.log
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Misc
+.DS_Store
+coverage
+.vscode
+.idea
