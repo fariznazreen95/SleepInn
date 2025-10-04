@@ -47,11 +47,31 @@ export default function MyTrips() {
     }
   }
 
-  const fmtDate = (d: string) =>
-    new Date(d + "T12:00:00").toLocaleDateString("en-MY", {
-      weekday: "short", day: "numeric", month: "short", year: "numeric"
+  // ========== DATE HELPERS (begin) ==========
+  /** Accepts 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS', normalizes to YYYY-MM-DD. */
+  function normalizeYMD(raw: string) {
+    if (!raw) return "";
+    // grab only the date portion to avoid double-time appends
+    return String(raw).slice(0, 10); // 'YYYY-MM-DD'
+  }
+
+  const fmtDate = (raw: string) => {
+    const ymd = normalizeYMD(raw);
+    if (!ymd) return "—";
+    // anchor to noon to avoid TZ edge cases rendering as previous day
+    const d = new Date(`${ymd}T12:00:00`);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleDateString("en-MY", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      year: "numeric",
     });
+  };
+
   const fmtRange = (a: string, b: string) => `${fmtDate(a)} → ${fmtDate(b)}`;
+  // ========== DATE HELPERS (end) ==========
+
 
   function badgeClass(status: Trip["status"]) {
     const base = "badge";
@@ -68,7 +88,7 @@ export default function MyTrips() {
   async function payNow(id: number) {
     setBusy(id);
     try {
-      const { url } = await api(`/api/stripe/checkout?booking=${id}`, { method: "POST" });
+      const { url } = await api(`/api/stripe/checkout/${id}`, { method: "POST" });
       if (!url) throw new Error("No checkout URL");
       window.location.assign(url);
     } catch (e: any) {
@@ -169,7 +189,14 @@ export default function MyTrips() {
                 <span className={badgeClass(r.status)}>{r.status}</span>
               </div>
 
-              <div className="muted">{fmtRange(r.start_date, r.end_date)} · {r.guests} guest(s)</div>
+              {/* ========== SUBTITLE (dates + guests) ========== */}
+<div className="muted">
+  {fmtRange(r.start_date, r.end_date)}
+  {typeof r.guests === "number" && r.guests > 0
+    ? ` · ${r.guests} ${r.guests === 1 ? "guest" : "guests"}`
+    : ""}
+</div>
+
               <div className="price">{fmtAnyAmount(r)}</div>
 
               {/* actions on mobile */}
@@ -311,7 +338,7 @@ function Style() {
     .mid { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:6px; }
     .toprow { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
     .strong { font-weight:700; }
-    .muted { color:${MUTED}; font-size: 14px; }
+    .muted { color:${MUTED}; font-size: 14px; margin-top: 2px; }
     .price { color:${ACCENT}; font-weight:700; margin-top:2px; }
 
     .right { width: 220px; flex:0 0 auto; display:flex; flex-direction:column; gap:8px; align-items:flex-end; justify-content:center; }
